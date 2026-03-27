@@ -1,0 +1,15 @@
+[package]
+name = "ref_str"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Shao G. <shaogme@gmail.com>"]
+repository = "https://github.com/shaogme/ref_str"
+description = "Compressed borrowed-or-shared string types for no_std Rust."
+readme = "README.md"
+homepage = "https://github.com/shaogme/ref_str"
+documentation = "https://docs.rs/ref_str"
+keywords = ["no_std", "string", "arc", "rc", "compression"]
+categories = ["no-std", "data-structures"]
+
+[dependencies]
