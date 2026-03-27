@@ -1,6 +1,6 @@
 [package]
 name = "ref_str"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Shao G. <shaogme@gmail.com>"]
@@ -13,3 +13,13 @@ keywords = ["no_std", "string", "arc", "rc", "compression"]
 categories = ["no-std", "data-structures"]
 
 [dependencies]
+arbitrary = { version = "1", default-features = false, features = ["derive"], optional = true }
+serde = { version = "1", default-features = false, features = ["alloc"], optional = true }
+
+[dev-dependencies]
+serde_test = "1"
+
+[features]
+arbitrary = ["dep:arbitrary"]
+serde = ["dep:serde"]
+std = ["serde?/std"]

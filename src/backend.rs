@@ -16,6 +16,12 @@ use core::ops::Deref;
 use core::ptr;
 use core::ptr::NonNull;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[cfg(feature = "arbitrary")]
+use arbitrary::{Arbitrary, Result as ArbitraryResult, Unstructured};
+
 /// Backend behavior for shared string ownership.
 pub trait RefCountBackend {
     /// The shared string handle for this backend.
@@ -433,6 +439,106 @@ impl<'a, B: RefCountBackend> fmt::Display for CompressedRefStr<'a, B> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a> Arbitrary<'a> for CompressedRefStr<'a, LocalBackend> {
+    /// Build a local string from arbitrary input.
+    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
+        let value = <&'a str>::arbitrary(u)?;
+        if u.arbitrary::<bool>()? {
+            Ok(Self::from(String::from(value)))
+        } else {
+            Ok(Self::from(value))
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a> Arbitrary<'a> for CompressedRefStr<'a, SharedBackend> {
+    /// Build a shared string from arbitrary input.
+    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
+        let value = <&'a str>::arbitrary(u)?;
+        if u.arbitrary::<bool>()? {
+            Ok(Self::from(String::from(value)))
+        } else {
+            Ok(Self::from(value))
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'a, B: RefCountBackend> Serialize for CompressedRefStr<'a, B> {
+    /// Serialize as a string slice.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for CompressedRefStr<'de, LocalBackend> {
+    /// Deserialize from a string value.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor(PhantomData<LocalBackend>);
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CompressedRefStr<'de, LocalBackend>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string")
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                v: &'de str,
+            ) -> Result<Self::Value, E> {
+                Ok(CompressedRefStr::from(v))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(CompressedRefStr::from(String::from(v)))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(CompressedRefStr::from(v))
+            }
+        }
+
+        deserializer.deserialize_str(Visitor(PhantomData))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for CompressedRefStr<'de, SharedBackend> {
+    /// Deserialize from a string value.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor(PhantomData<SharedBackend>);
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = CompressedRefStr<'de, SharedBackend>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string")
+            }
+
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                v: &'de str,
+            ) -> Result<Self::Value, E> {
+                Ok(CompressedRefStr::from(v))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(CompressedRefStr::from(String::from(v)))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(CompressedRefStr::from(v))
+            }
+        }
+
+        deserializer.deserialize_str(Visitor(PhantomData))
+    }
+}
+
 impl<'a, B: RefCountBackend> Clone for CompressedRefStr<'a, B> {
     /// Clone the value and bump the shared count when needed.
     fn clone(&self) -> Self {
@@ -475,6 +581,16 @@ mod tests {
     use alloc::string::String;
     use alloc::string::ToString;
     use alloc::sync::Arc;
+
+    #[cfg(feature = "arbitrary")]
+    use arbitrary::{Arbitrary, Unstructured};
+
+    #[cfg(feature = "serde")]
+    use serde::Deserialize;
+    #[cfg(feature = "serde")]
+    use serde::de::value::{BorrowedStrDeserializer, Error as DeError, StringDeserializer};
+    #[cfg(feature = "serde")]
+    use serde_test::{Token, assert_de_tokens, assert_ser_tokens};
 
     #[test]
     fn local_shared_roundtrip() {
@@ -617,5 +733,67 @@ mod tests {
         assert!(default_shared.is_borrowed());
         assert_eq!(default_local.as_str(), "");
         assert_eq!(default_shared.as_str(), "");
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn arbitrary_roundtrip() {
+        fn assert_case(bytes: &[u8], expected_shared: bool) {
+            let mut expected_local_u = Unstructured::new(bytes);
+            let expected_value = <&str>::arbitrary(&mut expected_local_u).unwrap();
+            let expected_flag = bool::arbitrary(&mut expected_local_u).unwrap();
+
+            let mut actual_local = Unstructured::new(bytes);
+            let local = LocalRefStr::arbitrary(&mut actual_local).unwrap();
+
+            assert_eq!(local.as_str(), expected_value);
+            assert_eq!(local.is_shared(), expected_flag);
+            assert_eq!(local.is_shared(), expected_shared);
+            assert_eq!(local.is_borrowed(), !expected_flag);
+
+            let mut expected_shared_u = Unstructured::new(bytes);
+            let expected_value = <&str>::arbitrary(&mut expected_shared_u).unwrap();
+            let expected_flag = bool::arbitrary(&mut expected_shared_u).unwrap();
+
+            let mut actual_shared = Unstructured::new(bytes);
+            let shared = RefStr::arbitrary(&mut actual_shared).unwrap();
+
+            assert_eq!(shared.as_str(), expected_value);
+            assert_eq!(shared.is_shared(), expected_flag);
+            assert_eq!(shared.is_shared(), expected_shared);
+            assert_eq!(shared.is_borrowed(), !expected_flag);
+        }
+
+        assert_case(b"hello\x01\x05", true);
+        assert_case(b"hello\x00\x05", false);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_roundtrip() {
+        let local = LocalRefStr::from("serde");
+        let shared = RefStr::from("serde");
+
+        assert_ser_tokens(&local, &[Token::Str("serde")]);
+        assert_ser_tokens(&shared, &[Token::Str("serde")]);
+
+        let local_borrowed: LocalRefStr<'_> =
+            Deserialize::deserialize(BorrowedStrDeserializer::<DeError>::new("serde")).unwrap();
+        let shared_borrowed: RefStr<'_> =
+            Deserialize::deserialize(BorrowedStrDeserializer::<DeError>::new("serde")).unwrap();
+        let local_owned: LocalRefStr<'_> =
+            Deserialize::deserialize(StringDeserializer::<DeError>::new(String::from("serde")))
+                .unwrap();
+        let shared_owned: RefStr<'_> =
+            Deserialize::deserialize(StringDeserializer::<DeError>::new(String::from("serde")))
+                .unwrap();
+
+        assert!(local_borrowed.is_borrowed());
+        assert!(shared_borrowed.is_borrowed());
+        assert!(local_owned.is_shared());
+        assert!(shared_owned.is_shared());
+
+        assert_de_tokens(&local_borrowed, &[Token::BorrowedStr("serde")]);
+        assert_de_tokens(&shared_borrowed, &[Token::BorrowedStr("serde")]);
     }
 }

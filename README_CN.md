@@ -21,6 +21,27 @@
 ref_str = "0.1"
 ```
 
+启用 serde：
+
+```toml
+[dependencies]
+ref_str = { version = "0.1", features = ["serde"] }
+```
+
+启用 serde + std：
+
+```toml
+[dependencies]
+ref_str = { version = "0.1", features = ["serde", "std"] }
+```
+
+启用 arbitrary：
+
+```toml
+[dependencies]
+ref_str = { version = "0.1", features = ["arbitrary"] }
+```
+
 ## 概览
 
 `LocalRefStr<'a>` 和 `RefStr<'a>` 可以在借用的 `&'a str` 与共享拥有的字符串之间切换，同时保持紧凑布局。
@@ -132,6 +153,8 @@ assert_eq!(value.as_str(), "hello");
 ## 说明
 
 - 本 crate 是 `no_std`，依赖 `alloc`
+- `std` feature 本身不会启用 serde，只会在 serde 已启用时透传 `serde/std`
+- `arbitrary` feature 会为模糊测试和性质测试启用 `Arbitrary`
 - 原始指针相关接口是 `unsafe`
 
 ## 许可证

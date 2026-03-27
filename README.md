@@ -21,6 +21,27 @@
 ref_str = "0.1"
 ```
 
+With serde support:
+
+```toml
+[dependencies]
+ref_str = { version = "0.1", features = ["serde"] }
+```
+
+With serde + std support:
+
+```toml
+[dependencies]
+ref_str = { version = "0.1", features = ["serde", "std"] }
+```
+
+With arbitrary support:
+
+```toml
+[dependencies]
+ref_str = { version = "0.1", features = ["arbitrary"] }
+```
+
 ## Overview
 
 `LocalRefStr<'a>` and `RefStr<'a>` store either a borrowed `&'a str` or an owned shared string, while keeping the representation compact and clone-friendly.
@@ -132,6 +153,8 @@ assert_eq!(value.as_str(), "hello");
 ## Notes
 
 - This crate is `no_std` and depends on `alloc`.
+- The `std` feature does not enable `serde` by itself; it only forwards `serde/std` when `serde` is already enabled.
+- The `arbitrary` feature enables `Arbitrary` support for fuzzing and property testing.
 - The raw-pointer APIs are intentionally `unsafe`.
 
 ## License
