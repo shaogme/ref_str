@@ -1,26 +1,20 @@
-//! Internal backend and shared implementation for compressed string types.
+//! Internal core implementation for compressed string types.
 
+use ::core::borrow::Borrow;
+use ::core::cmp::Ordering;
+use ::core::fmt;
+use ::core::hash::{Hash, Hasher};
+use ::core::marker::PhantomData;
+use ::core::mem::ManuallyDrop;
+use ::core::ops::Deref;
+use ::core::ptr;
+use ::core::ptr::NonNull;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::borrow::Borrow;
-use core::cmp::Ordering;
-use core::fmt;
-use core::hash::{Hash, Hasher};
-use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
-use core::ops::Deref;
-use core::ptr;
-use core::ptr::NonNull;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-#[cfg(feature = "arbitrary")]
-use arbitrary::{Arbitrary, Result as ArbitraryResult, Unstructured};
 
 /// Backend behavior for shared string ownership.
 pub trait RefCountBackend {
@@ -35,6 +29,12 @@ pub trait RefCountBackend {
 
     /// Rebuild the shared string handle from a raw `*const str`.
     unsafe fn from_raw(ptr: *const str) -> Self::Shared;
+
+    /// Build the shared string handle from a `&str`.
+    fn from_str(s: &str) -> Self::Shared;
+
+    /// Build the shared string handle from a `Box<str>`
+    fn from_boxed_str(s: Box<str>) -> Self::Shared;
 }
 
 /// `Rc<str>` backend.
@@ -59,6 +59,15 @@ impl RefCountBackend for LocalBackend {
     /// Rebuild `Rc<str>` from a raw `*const str`.
     unsafe fn from_raw(ptr: *const str) -> Self::Shared {
         unsafe { Rc::from_raw(ptr) }
+    }
+
+    /// Build `Rc<str>` from a `&str`.
+    fn from_str(s: &str) -> Self::Shared {
+        Rc::from(s)
+    }
+
+    fn from_boxed_str(s: Box<str>) -> Self::Shared {
+        Rc::from(s)
     }
 }
 
@@ -85,10 +94,19 @@ impl RefCountBackend for SharedBackend {
     unsafe fn from_raw(ptr: *const str) -> Self::Shared {
         unsafe { Arc::from_raw(ptr) }
     }
+
+    /// Build `Arc<str>` from a `&str`.
+    fn from_str(s: &str) -> Self::Shared {
+        Arc::from(s)
+    }
+
+    fn from_boxed_str(s: Box<str>) -> Self::Shared {
+        Arc::from(s)
+    }
 }
 
-/// Internal 16-byte compressed string representation.
-pub struct CompressedRefStr<'a, B: RefCountBackend> {
+/// Internal compact two-word string representation.
+pub struct RefStrCore<'a, B: RefCountBackend> {
     /// Packed pointer to the string data.
     raw_ptr: NonNull<u8>,
     /// Packed length and tag bits.
@@ -99,7 +117,7 @@ pub struct CompressedRefStr<'a, B: RefCountBackend> {
     _backend: PhantomData<B>,
 }
 
-impl<'a, B: RefCountBackend> CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
     /// Bit used to distinguish shared and static states.
     const TAG_MASK: usize = 1usize << (usize::BITS - 1);
     /// Mask for the length payload.
@@ -125,6 +143,12 @@ impl<'a, B: RefCountBackend> CompressedRefStr<'a, B> {
                 Self::STATIC_TAG,
             )
         }
+    }
+
+    /// Build a shared value from string-like input.
+    #[inline]
+    pub fn from_owned_like<R: AsRef<str>>(s: R) -> Self {
+        Self::from_shared(B::from_str(s.as_ref()))
     }
 
     /// Build from raw parts.
@@ -183,11 +207,6 @@ impl<'a, B: RefCountBackend> CompressedRefStr<'a, B> {
         }
     }
 
-    /// Build from a `&'static str`.
-    pub fn from_static(s: &'static str) -> CompressedRefStr<'static, B> {
-        CompressedRefStr::from_str(s)
-    }
-
     /// Return `true` if the value stores a shared string.
     #[inline]
     pub const fn is_shared(&self) -> bool {
@@ -221,8 +240,8 @@ impl<'a, B: RefCountBackend> CompressedRefStr<'a, B> {
     /// View the value as `&str`.
     pub fn as_str(&self) -> &str {
         unsafe {
-            let slice = core::slice::from_raw_parts(self.data_ptr(), self.len());
-            core::str::from_utf8_unchecked(slice)
+            let slice = ::core::slice::from_raw_parts(self.data_ptr(), self.len());
+            ::core::str::from_utf8_unchecked(slice)
         }
     }
 
@@ -240,39 +259,71 @@ impl<'a, B: RefCountBackend> CompressedRefStr<'a, B> {
     pub fn into_string(self) -> String {
         String::from(self.as_str())
     }
+
+    pub fn into_cow(self) -> Cow<'a, str> {
+        if self.is_shared() {
+            Cow::Owned(self.into_string())
+        } else {
+            unsafe { Cow::Borrowed(self.into_str_unchecked()) }
+        }
+    }
+
+    /// Convert the string into `&str` without checking if it's borrowed.
+    pub unsafe fn into_str_unchecked(self) -> &'a str {
+        unsafe { &*self.into_raw() }
+    }
+
+    /// Convert the string into a `Cow<str>`.
+    ///
+    /// Borrowed values stay borrowed. Shared values allocate a new owned
+    /// string because `Cow<'a, str>` cannot borrow from `Rc<str>` or `Arc<str>`.
+    pub fn as_cow(&'a self) -> Cow<'a, str> {
+        if self.is_shared() {
+            Cow::Owned(self.to_string())
+        } else {
+            Cow::Borrowed(self.as_str())
+        }
+    }
 }
 
-impl<'a, B: RefCountBackend> From<&'a str> for CompressedRefStr<'a, B> {
+impl<B: RefCountBackend> RefStrCore<'static, B> {
+    /// Build from a static `&str`.
+    pub fn from_static(s: &'static str) -> Self {
+        Self::from_str(s)
+    }
+}
+
+impl<'a, B: RefCountBackend> From<&'a str> for RefStrCore<'a, B> {
     /// Build from a borrowed `&str`.
     fn from(value: &'a str) -> Self {
         Self::new(value)
     }
 }
 
-impl<'a, B: RefCountBackend> From<&'a alloc::string::String> for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> From<&'a String> for RefStrCore<'a, B> {
     /// Build from a borrowed `String`.
-    fn from(value: &'a alloc::string::String) -> Self {
+    fn from(value: &'a String) -> Self {
         Self::from(value.as_str())
     }
 }
 
-impl<'a> From<Rc<str>> for CompressedRefStr<'a, LocalBackend> {
+impl<'a> From<Rc<str>> for RefStrCore<'a, LocalBackend> {
     /// Build a local string from `Rc<str>`.
     fn from(value: Rc<str>) -> Self {
         Self::from_shared(value)
     }
 }
 
-impl<'a> From<Arc<str>> for CompressedRefStr<'a, SharedBackend> {
+impl<'a> From<Arc<str>> for RefStrCore<'a, SharedBackend> {
     /// Build a shared string from `Arc<str>`.
     fn from(value: Arc<str>) -> Self {
         Self::from_shared(value)
     }
 }
 
-impl<'a> From<CompressedRefStr<'a, LocalBackend>> for CompressedRefStr<'a, SharedBackend> {
+impl<'a> From<RefStrCore<'a, LocalBackend>> for RefStrCore<'a, SharedBackend> {
     /// Convert a local string into a shared string.
-    fn from(value: CompressedRefStr<'a, LocalBackend>) -> Self {
+    fn from(value: RefStrCore<'a, LocalBackend>) -> Self {
         if value.is_shared() {
             Self::from_shared(Arc::from(value.as_str()))
         } else {
@@ -282,9 +333,9 @@ impl<'a> From<CompressedRefStr<'a, LocalBackend>> for CompressedRefStr<'a, Share
     }
 }
 
-impl<'a> From<CompressedRefStr<'a, SharedBackend>> for CompressedRefStr<'a, LocalBackend> {
+impl<'a> From<RefStrCore<'a, SharedBackend>> for RefStrCore<'a, LocalBackend> {
     /// Convert a shared string into a local string.
-    fn from(value: CompressedRefStr<'a, SharedBackend>) -> Self {
+    fn from(value: RefStrCore<'a, SharedBackend>) -> Self {
         if value.is_shared() {
             Self::from_shared(Rc::from(value.as_str()))
         } else {
@@ -294,42 +345,28 @@ impl<'a> From<CompressedRefStr<'a, SharedBackend>> for CompressedRefStr<'a, Loca
     }
 }
 
-impl<'a> From<Box<str>> for CompressedRefStr<'a, LocalBackend> {
+impl<'a, B: RefCountBackend> From<Box<str>> for RefStrCore<'a, B> {
     /// Build a local string from `Box<str>`.
     fn from(value: Box<str>) -> Self {
-        Self::from_shared(Rc::from(value))
+        Self::from_shared(B::from_boxed_str(value))
     }
 }
 
-impl<'a> From<Box<str>> for CompressedRefStr<'a, SharedBackend> {
-    /// Build a shared string from `Box<str>`.
-    fn from(value: Box<str>) -> Self {
-        Self::from_shared(Arc::from(value))
-    }
-}
-
-impl<'a> From<alloc::string::String> for CompressedRefStr<'a, LocalBackend> {
+impl<'a, B: RefCountBackend> From<String> for RefStrCore<'a, B> {
     /// Build a local string from `String`.
-    fn from(value: alloc::string::String) -> Self {
-        Self::from_shared(Rc::from(value))
+    fn from(value: String) -> Self {
+        Self::from_shared(B::from_boxed_str(value.into_boxed_str()))
     }
 }
 
-impl<'a> From<alloc::string::String> for CompressedRefStr<'a, SharedBackend> {
-    /// Build a shared string from `String`.
-    fn from(value: alloc::string::String) -> Self {
-        Self::from_shared(Arc::from(value))
-    }
-}
-
-impl<'a, B: RefCountBackend> From<CompressedRefStr<'a, B>> for Cow<'a, str> {
+impl<'a, B: RefCountBackend> From<RefStrCore<'a, B>> for Cow<'a, str> {
     /// Convert into a borrowed-or-owned `Cow<str>`.
-    fn from(value: CompressedRefStr<'a, B>) -> Self {
-        Cow::Owned(value.into_string())
+    fn from(value: RefStrCore<'a, B>) -> Self {
+        value.into_cow()
     }
 }
 
-impl<'a> From<Cow<'a, str>> for CompressedRefStr<'a, LocalBackend> {
+impl<'a, B: RefCountBackend> From<Cow<'a, str>> for RefStrCore<'a, B> {
     /// Build a local string from `Cow<str>`.
     fn from(value: Cow<'a, str>) -> Self {
         match value {
@@ -339,82 +376,72 @@ impl<'a> From<Cow<'a, str>> for CompressedRefStr<'a, LocalBackend> {
     }
 }
 
-impl<'a> From<Cow<'a, str>> for CompressedRefStr<'a, SharedBackend> {
-    /// Build a shared string from `Cow<str>`.
-    fn from(value: Cow<'a, str>) -> Self {
-        match value {
-            Cow::Borrowed(s) => Self::from(s),
-            Cow::Owned(s) => Self::from(s),
-        }
-    }
-}
-
-impl<'a, B: RefCountBackend> Default for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Default for RefStrCore<'a, B> {
     /// Create an empty borrowed string.
     fn default() -> Self {
-        Self::from_static("")
+        Self::from_str("")
     }
 }
 
-impl<'a, B: RefCountBackend> AsRef<str> for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> AsRef<str> for RefStrCore<'a, B> {
     /// Borrow as `&str`.
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl<'a, B: RefCountBackend> Borrow<str> for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Borrow<str> for RefStrCore<'a, B> {
     /// Borrow as `&str`.
     fn borrow(&self) -> &str {
         self.as_str()
     }
 }
 
-impl<'a, B: RefCountBackend> PartialEq for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> PartialEq for RefStrCore<'a, B> {
     /// Compare by string contents.
     fn eq(&self, other: &Self) -> bool {
         self.as_str() == other.as_str()
     }
 }
 
-impl<'a, B: RefCountBackend> Eq for CompressedRefStr<'a, B> {}
+impl<'a, B: RefCountBackend> Eq for RefStrCore<'a, B> {}
 
-impl<'a, B: RefCountBackend> PartialEq<&str> for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> PartialEq<&str> for RefStrCore<'a, B> {
     /// Compare against `&str`.
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
     }
 }
 
-impl<'a, B: RefCountBackend> PartialEq<alloc::string::String> for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> PartialEq<String> for RefStrCore<'a, B> {
     /// Compare against `String`.
-    fn eq(&self, other: &alloc::string::String) -> bool {
+    fn eq(&self, other: &String) -> bool {
         self.as_str() == other.as_str()
     }
 }
 
-impl<'a, B: RefCountBackend> PartialOrd for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> PartialOrd for RefStrCore<'a, B> {
     /// Compare lexicographically.
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a, B: RefCountBackend> Ord for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Ord for RefStrCore<'a, B> {
     /// Compare lexicographically.
     fn cmp(&self, other: &Self) -> Ordering {
         self.as_str().cmp(other.as_str())
     }
 }
 
-impl<'a, B: RefCountBackend> Hash for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Hash for RefStrCore<'a, B> {
     /// Hash the string contents.
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.as_str().hash(state)
     }
 }
 
-impl<'a, B: RefCountBackend> Deref for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Deref for RefStrCore<'a, B> {
     type Target = str;
 
     /// Dereference to `str`.
@@ -423,123 +450,21 @@ impl<'a, B: RefCountBackend> Deref for CompressedRefStr<'a, B> {
     }
 }
 
-impl<'a, B: RefCountBackend> fmt::Debug for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> fmt::Debug for RefStrCore<'a, B> {
     /// Format as a debug tuple.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("CompressedRefStr")
-            .field(&self.as_str())
-            .finish()
+        f.debug_tuple("RefStrCore").field(&self.as_str()).finish()
     }
 }
 
-impl<'a, B: RefCountBackend> fmt::Display for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> fmt::Display for RefStrCore<'a, B> {
     /// Format the string contents.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-#[cfg(feature = "arbitrary")]
-impl<'a> Arbitrary<'a> for CompressedRefStr<'a, LocalBackend> {
-    /// Build a local string from arbitrary input.
-    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
-        let value = <&'a str>::arbitrary(u)?;
-        if u.arbitrary::<bool>()? {
-            Ok(Self::from(String::from(value)))
-        } else {
-            Ok(Self::from(value))
-        }
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<'a> Arbitrary<'a> for CompressedRefStr<'a, SharedBackend> {
-    /// Build a shared string from arbitrary input.
-    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
-        let value = <&'a str>::arbitrary(u)?;
-        if u.arbitrary::<bool>()? {
-            Ok(Self::from(String::from(value)))
-        } else {
-            Ok(Self::from(value))
-        }
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'a, B: RefCountBackend> Serialize for CompressedRefStr<'a, B> {
-    /// Serialize as a string slice.
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> Deserialize<'de> for CompressedRefStr<'de, LocalBackend> {
-    /// Deserialize from a string value.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor(PhantomData<LocalBackend>);
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = CompressedRefStr<'de, LocalBackend>;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string")
-            }
-
-            fn visit_borrowed_str<E: serde::de::Error>(
-                self,
-                v: &'de str,
-            ) -> Result<Self::Value, E> {
-                Ok(CompressedRefStr::from(v))
-            }
-
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                Ok(CompressedRefStr::from(String::from(v)))
-            }
-
-            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-                Ok(CompressedRefStr::from(v))
-            }
-        }
-
-        deserializer.deserialize_str(Visitor(PhantomData))
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> Deserialize<'de> for CompressedRefStr<'de, SharedBackend> {
-    /// Deserialize from a string value.
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor(PhantomData<SharedBackend>);
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = CompressedRefStr<'de, SharedBackend>;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string")
-            }
-
-            fn visit_borrowed_str<E: serde::de::Error>(
-                self,
-                v: &'de str,
-            ) -> Result<Self::Value, E> {
-                Ok(CompressedRefStr::from(v))
-            }
-
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-                Ok(CompressedRefStr::from(String::from(v)))
-            }
-
-            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-                Ok(CompressedRefStr::from(v))
-            }
-        }
-
-        deserializer.deserialize_str(Visitor(PhantomData))
-    }
-}
-
-impl<'a, B: RefCountBackend> Clone for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Clone for RefStrCore<'a, B> {
     /// Clone the value and bump the shared count when needed.
     fn clone(&self) -> Self {
         if self.is_shared() {
@@ -559,7 +484,7 @@ impl<'a, B: RefCountBackend> Clone for CompressedRefStr<'a, B> {
     }
 }
 
-impl<'a, B: RefCountBackend> Drop for CompressedRefStr<'a, B> {
+impl<'a, B: RefCountBackend> Drop for RefStrCore<'a, B> {
     /// Release the shared reference when dropping a shared value.
     fn drop(&mut self) {
         if self.is_shared() {
@@ -574,12 +499,11 @@ impl<'a, B: RefCountBackend> Drop for CompressedRefStr<'a, B> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{LocalRefStr, RefStr};
+    use crate::{LocalRefStr, LocalStaticRefStr, RefStr, StaticRefStr};
     use alloc::borrow::Cow;
     use alloc::boxed::Box;
     use alloc::rc::Rc;
-    use alloc::string::String;
-    use alloc::string::ToString;
+    use alloc::string::{String, ToString};
     use alloc::sync::Arc;
 
     #[cfg(feature = "arbitrary")]
@@ -720,10 +644,27 @@ mod tests {
 
     #[test]
     fn static_roundtrip() {
-        let local = LocalRefStr::from_static("world");
-        let shared = RefStr::from_static("world");
+        let local = LocalRefStr::from_str("world");
+        let shared = RefStr::from_str("world");
         let default_local: LocalRefStr<'_> = Default::default();
         let default_shared: RefStr<'_> = Default::default();
+
+        assert_eq!(local.as_str(), "world");
+        assert_eq!(shared.as_str(), "world");
+        assert!(!local.is_shared());
+        assert!(!shared.is_shared());
+        assert!(default_local.is_borrowed());
+        assert!(default_shared.is_borrowed());
+        assert_eq!(default_local.as_str(), "");
+        assert_eq!(default_shared.as_str(), "");
+    }
+
+    #[test]
+    fn dedicated_static_wrapper_roundtrip() {
+        let local = LocalStaticRefStr::from_static("world");
+        let shared = StaticRefStr::from_static("world");
+        let default_local: LocalStaticRefStr = Default::default();
+        let default_shared: StaticRefStr = Default::default();
 
         assert_eq!(local.as_str(), "world");
         assert_eq!(shared.as_str(), "world");
@@ -768,6 +709,21 @@ mod tests {
         assert_case(b"hello\x00\x05", false);
     }
 
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn static_arbitrary_is_always_shared() {
+        let mut local = Unstructured::new(b"hello\x01\x05");
+        let mut shared = Unstructured::new(b"world\x00\x05");
+
+        let local_value = LocalStaticRefStr::arbitrary(&mut local).unwrap();
+        let shared_value = StaticRefStr::arbitrary(&mut shared).unwrap();
+
+        assert_eq!(local_value.as_str(), "hello");
+        assert_eq!(shared_value.as_str(), "world");
+        assert!(local_value.is_shared());
+        assert!(shared_value.is_shared());
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn serde_roundtrip() {
@@ -795,5 +751,31 @@ mod tests {
 
         assert_de_tokens(&local_borrowed, &[Token::BorrowedStr("serde")]);
         assert_de_tokens(&shared_borrowed, &[Token::BorrowedStr("serde")]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn static_serde_roundtrip() {
+        let local = LocalStaticRefStr::from("serde");
+        let shared = StaticRefStr::from("serde");
+
+        assert_ser_tokens(&local, &[Token::Str("serde")]);
+        assert_ser_tokens(&shared, &[Token::Str("serde")]);
+
+        let local_borrowed: LocalStaticRefStr =
+            Deserialize::deserialize(BorrowedStrDeserializer::<DeError>::new("serde")).unwrap();
+        let shared_borrowed: StaticRefStr =
+            Deserialize::deserialize(BorrowedStrDeserializer::<DeError>::new("serde")).unwrap();
+        let local_owned: LocalStaticRefStr =
+            Deserialize::deserialize(StringDeserializer::<DeError>::new(String::from("serde")))
+                .unwrap();
+        let shared_owned: StaticRefStr =
+            Deserialize::deserialize(StringDeserializer::<DeError>::new(String::from("serde")))
+                .unwrap();
+
+        assert!(local_borrowed.is_shared());
+        assert!(shared_borrowed.is_shared());
+        assert!(local_owned.is_shared());
+        assert!(shared_owned.is_shared());
     }
 }
