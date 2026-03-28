@@ -81,6 +81,7 @@ All four public types share the same core model:
 | `into_boxed_str()` | Convert into `Box<str>` |
 | `into_string()` | Convert into `String` |
 | `into_str_unchecked()` | Extract `&str` without verifying borrowed state |
+| `==` / `PartialEq` | Compare directly with `&str`, `String`, `Cow<str>`, `Rc<str>`, and `Arc<str>` |
 
 ## Conversion Map
 
@@ -164,9 +165,12 @@ These APIs are intended for FFI or other low-level ownership transfer cases:
 - `into_raw_parts()`
 - `from_raw_parts()`
 - `into_raw()`
+- `into_raw_shared()`
 - `increment_strong_count()`
 
-All of them are `unsafe`, because they expose the packed representation or raw shared pointer ownership rules directly.
+`into_raw()` is intentionally low-level: its returned `*const str` is ambiguous and may point to either borrowed data or shared backend storage. If you need a pointer that is guaranteed to come from shared storage, prefer `into_raw_shared()`. Passing a borrowed pointer from `into_raw()` into `increment_strong_count()` is undefined behavior.
+
+The `unsafe` APIs here expose the packed representation or raw shared-pointer ownership rules directly.
 
 Raw:
 
@@ -190,6 +194,21 @@ use ref_str::RefStr;
 
 let value: RefStr<'_> = Cow::Borrowed("hello").into();
 assert_eq!(value.as_str(), "hello");
+```
+
+Comparisons:
+
+```rust
+# extern crate alloc;
+use alloc::borrow::Cow;
+use alloc::rc::Rc;
+use alloc::sync::Arc;
+use ref_str::RefStr;
+
+let value = RefStr::from("hello");
+assert!(value == Cow::Borrowed("hello"));
+assert!(value == Arc::<str>::from("hello"));
+assert!(value == Rc::<str>::from("hello"));
 ```
 
 Static:

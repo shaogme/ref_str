@@ -28,6 +28,9 @@ macro_rules! lifetime_wrapper_suite {
                 assert_eq!(value.as_str(), "borrowed");
                 assert!(value.is_borrowed());
                 assert_eq!(value.as_cow(), Cow::Borrowed("borrowed"));
+                assert!(value == Cow::Borrowed("borrowed"));
+                assert!(value == std::sync::Arc::<str>::from("borrowed"));
+                assert!(value == std::rc::Rc::<str>::from("borrowed"));
             }
 
             #[test]
@@ -49,10 +52,36 @@ macro_rules! lifetime_wrapper_suite {
                 assert_eq!(value.as_str(), "hello");
                 assert!(value.is_shared());
                 assert_eq!($strong_count(&original), 2);
+                assert!(value == Cow::Owned(String::from("hello")));
 
                 let cloned = value.clone();
                 assert_eq!(cloned.as_str(), "hello");
                 assert_eq!($strong_count(&original), 3);
+            }
+
+            #[test]
+            fn into_raw_shared_disambiguates_state() {
+                let borrowed_owner = String::from("borrowed");
+                let borrowed = Sut::from(&borrowed_owner[..]);
+                assert!(borrowed.into_raw_shared().is_none());
+
+                let original: $shared = ($make_shared)("shared");
+                let shared = Sut::from_shared(original.clone());
+                let raw = shared
+                    .into_raw_shared()
+                    .expect("shared value should produce a raw pointer");
+
+                assert_eq!($strong_count(&original), 2);
+
+                unsafe {
+                    Sut::increment_strong_count(raw);
+                }
+                assert_eq!($strong_count(&original), 3);
+
+                unsafe {
+                    drop($from_raw(raw));
+                }
+                assert_eq!($strong_count(&original), 2);
             }
 
             #[test]
@@ -168,6 +197,9 @@ macro_rules! static_wrapper_suite {
                 assert!(value.is_borrowed());
                 assert!(default_value.is_borrowed());
                 assert_eq!(default_value.as_str(), "");
+                assert!(value == Cow::Borrowed("borrowed"));
+                assert!(value == std::sync::Arc::<str>::from("borrowed"));
+                assert!(value == std::rc::Rc::<str>::from("borrowed"));
             }
 
             #[test]
@@ -189,10 +221,35 @@ macro_rules! static_wrapper_suite {
                 assert_eq!(value.as_str(), "hello");
                 assert!(value.is_shared());
                 assert_eq!($strong_count(&original), 2);
+                assert!(value == Cow::Owned(String::from("hello")));
 
                 let cloned = value.clone();
                 assert_eq!(cloned.as_str(), "hello");
                 assert_eq!($strong_count(&original), 3);
+            }
+
+            #[test]
+            fn into_raw_shared_disambiguates_state() {
+                let borrowed = Sut::from_static("borrowed");
+                assert!(borrowed.into_raw_shared().is_none());
+
+                let original: $shared = ($make_shared)("shared");
+                let shared = Sut::from_shared(original.clone());
+                let raw = shared
+                    .into_raw_shared()
+                    .expect("shared value should produce a raw pointer");
+
+                assert_eq!($strong_count(&original), 2);
+
+                unsafe {
+                    Sut::increment_strong_count(raw);
+                }
+                assert_eq!($strong_count(&original), 3);
+
+                unsafe {
+                    drop($from_raw(raw));
+                }
+                assert_eq!($strong_count(&original), 2);
             }
 
             #[test]
@@ -321,3 +378,51 @@ static_wrapper_suite!(
     LocalStaticRefStr,
     RefStr
 );
+
+fn assert_send<T: Send>() {}
+fn assert_sync<T: Sync>() {}
+
+#[test]
+fn shared_variants_are_send_and_sync() {
+    assert_send::<RefStr<'static>>();
+    assert_sync::<RefStr<'static>>();
+    assert_send::<StaticRefStr>();
+    assert_sync::<StaticRefStr>();
+}
+
+#[test]
+fn as_cow_is_not_tied_to_container_lifetime() {
+    fn via_ref_str<'a>(s: &'a str) -> Cow<'a, str> {
+        let value = RefStr::from(s);
+        value.as_cow()
+    }
+
+    fn via_local_ref_str<'a>(s: &'a str) -> Cow<'a, str> {
+        let value = LocalRefStr::from(s);
+        value.as_cow()
+    }
+
+    let owned = String::from("borrowed");
+    let cow_ref = via_ref_str(&owned);
+    let cow_local = via_local_ref_str(&owned);
+
+    assert_eq!(cow_ref, Cow::Borrowed("borrowed"));
+    assert_eq!(cow_local, Cow::Borrowed("borrowed"));
+}
+
+#[test]
+fn alternate_debug_exposes_state() {
+    let borrowed = RefStr::from("hello");
+    let shared = RefStr::from(String::from("world"));
+
+    let borrowed_dbg = format!("{:#?}", borrowed);
+    let shared_dbg = format!("{:#?}", shared);
+
+    assert!(borrowed_dbg.contains("state: \"Borrowed\""));
+    assert!(borrowed_dbg.contains("len: 5"));
+    assert!(borrowed_dbg.contains("value: \"hello\""));
+
+    assert!(shared_dbg.contains("state: \"Shared\""));
+    assert!(shared_dbg.contains("len: 5"));
+    assert!(shared_dbg.contains("value: \"world\""));
+}

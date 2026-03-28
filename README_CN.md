@@ -81,6 +81,7 @@ ref_str = { version = "0.1", features = ["arbitrary"] }
 | `into_boxed_str()` | 转成 `Box<str>` |
 | `into_string()` | 转成 `String` |
 | `into_str_unchecked()` | 不检查状态直接取出 `&str` |
+| `==` / `PartialEq` | 直接与 `&str`、`String`、`Cow<str>`、`Rc<str>`、`Arc<str>` 做内容比较 |
 
 ## 转换图
 
@@ -164,9 +165,12 @@ assert_eq!(value.as_str(), "hello");
 - `into_raw_parts()`
 - `from_raw_parts()`
 - `into_raw()`
+- `into_raw_shared()`
 - `increment_strong_count()`
 
-它们都是 `unsafe`，因为会直接暴露内部打包表示或共享指针的所有权规则。
+`into_raw()` 是刻意保持底层语义的接口：它返回的 `*const str` 可能指向 borrowed 数据，也可能指向 shared 后端存储。如果你需要“确定来自共享存储”的原始指针，应优先使用 `into_raw_shared()`。把一个来自 borrowed 值的 `into_raw()` 指针传给 `increment_strong_count()` 属于未定义行为。
+
+这里的 `unsafe` API 会直接暴露内部打包表示或共享指针的所有权规则。
 
 原始值：
 
@@ -190,6 +194,21 @@ use ref_str::RefStr;
 
 let value: RefStr<'_> = Cow::Borrowed("hello").into();
 assert_eq!(value.as_str(), "hello");
+```
+
+比较：
+
+```rust
+# extern crate alloc;
+use alloc::borrow::Cow;
+use alloc::rc::Rc;
+use alloc::sync::Arc;
+use ref_str::RefStr;
+
+let value = RefStr::from("hello");
+assert!(value == Cow::Borrowed("hello"));
+assert!(value == Arc::<str>::from("hello"));
+assert!(value == Rc::<str>::from("hello"));
 ```
 
 Static：

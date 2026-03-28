@@ -16,6 +16,9 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+const TAG_MASK: usize = 1usize << (usize::BITS - 1);
+const LEN_MASK: usize = !TAG_MASK;
+
 /// Backend behavior for shared string ownership.
 pub trait RefCountBackend {
     /// The shared string handle for this backend.
@@ -32,6 +35,9 @@ pub trait RefCountBackend {
 
     /// Build the shared string handle from a `&str`.
     fn from_str(s: &str) -> Self::Shared;
+
+    /// Build the shared string handle from a [`String`].
+    fn from_string(s: String) -> Self::Shared;
 
     /// Build the shared string handle from a `Box<str>`
     fn from_boxed_str(s: Box<str>) -> Self::Shared;
@@ -63,6 +69,10 @@ impl RefCountBackend for LocalBackend {
 
     /// Build `Rc<str>` from a `&str`.
     fn from_str(s: &str) -> Self::Shared {
+        Rc::from(s)
+    }
+
+    fn from_string(s: String) -> Self::Shared {
         Rc::from(s)
     }
 
@@ -100,8 +110,60 @@ impl RefCountBackend for SharedBackend {
         Arc::from(s)
     }
 
+    fn from_string(s: String) -> Self::Shared {
+        Arc::from(s)
+    }
+
     fn from_boxed_str(s: Box<str>) -> Self::Shared {
         Arc::from(s)
+    }
+}
+
+/// Raw compact representation used to move encoded state through `const` APIs.
+#[derive(Copy, Clone)]
+pub(crate) struct RawParts {
+    raw_ptr: NonNull<u8>,
+    len_and_tag: usize,
+}
+
+impl RawParts {
+    /// Build encoded parts from already-validated fields.
+    pub(crate) const unsafe fn new(raw_ptr: NonNull<u8>, len: usize, tag: usize) -> Self {
+        assert!(len <= LEN_MASK, "string too large to compress");
+        Self {
+            raw_ptr,
+            len_and_tag: len | tag,
+        }
+    }
+
+    /// Return the stored data pointer.
+    pub(crate) const fn raw_ptr(self) -> NonNull<u8> {
+        self.raw_ptr
+    }
+
+    /// Return the stored string length.
+    pub(crate) const fn len(self) -> usize {
+        self.len_and_tag & LEN_MASK
+    }
+
+    /// Return the stored tag bits.
+    pub(crate) const fn tag(self) -> usize {
+        self.len_and_tag & TAG_MASK
+    }
+
+    /// Return the packed `len | tag` word.
+    pub(crate) const fn len_and_tag(self) -> usize {
+        self.len_and_tag
+    }
+
+    /// Convert the parts into a raw `*const str`.
+    pub(crate) const fn into_raw(self) -> *const str {
+        ptr::slice_from_raw_parts(self.raw_ptr.as_ptr(), self.len()) as *const str
+    }
+
+    /// Expose the legacy `(ptr, len, tag)` tuple form.
+    pub(crate) const fn into_tuple(self) -> (NonNull<u8>, usize, usize) {
+        (self.raw_ptr(), self.len(), self.tag())
     }
 }
 
@@ -117,11 +179,31 @@ pub struct RefStrCore<'a, B: RefCountBackend> {
     _backend: PhantomData<B>,
 }
 
+// Safety: `RefStrCore` only stores a pointer/len pair and defers shared-ownership
+// synchronization guarantees to the backend handle type.
+unsafe impl<'a, B> Send for RefStrCore<'a, B>
+where
+    B: RefCountBackend,
+    B::Shared: Send,
+{
+}
+
+// Safety: sharing references to `RefStrCore` is sound whenever the backend
+// shared handle is itself `Sync`.
+unsafe impl<'a, B> Sync for RefStrCore<'a, B>
+where
+    B: RefCountBackend,
+    B::Shared: Sync,
+{
+}
+
 impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
-    /// Bit used to distinguish shared and static states.
-    const TAG_MASK: usize = 1usize << (usize::BITS - 1);
+    /// Bit used to distinguish shared and borrowed states.
+    ///
+    /// This tag is stored in `len_and_tag`, never in the pointer itself.
+    const TAG_MASK: usize = TAG_MASK;
     /// Mask for the length payload.
-    const LEN_MASK: usize = !Self::TAG_MASK;
+    const LEN_MASK: usize = LEN_MASK;
     /// Tag value used for shared strings.
     const SHARED_TAG: usize = Self::TAG_MASK;
     /// Tag value used for borrowed strings.
@@ -154,10 +236,15 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
     /// Build from raw parts.
     #[inline]
     pub const unsafe fn from_raw_parts(raw_ptr: NonNull<u8>, len: usize, tag: usize) -> Self {
-        assert!(len <= Self::LEN_MASK, "string too large to compress");
+        unsafe { Self::from_raw_parts_struct(RawParts::new(raw_ptr, len, tag)) }
+    }
+
+    /// Build from encoded raw parts.
+    #[inline]
+    pub(crate) const unsafe fn from_raw_parts_struct(parts: RawParts) -> Self {
         Self {
-            raw_ptr,
-            len_and_tag: len | tag,
+            raw_ptr: parts.raw_ptr(),
+            len_and_tag: parts.len_and_tag(),
             _marker: PhantomData,
             _backend: PhantomData,
         }
@@ -180,27 +267,63 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
     ///
     /// The caller becomes responsible for reconstructing or freeing it.
     pub const unsafe fn into_raw_parts(self) -> (NonNull<u8>, usize, usize) {
+        unsafe { self.into_raw_parts_struct().into_tuple() }
+    }
+
+    /// Split the value into encoded raw parts.
+    pub(crate) const unsafe fn into_raw_parts_struct(self) -> RawParts {
         let this = ManuallyDrop::new(self);
-        let this_ptr = &this as *const ManuallyDrop<Self> as *const Self;
+        unsafe { Self::raw_parts_from_manuallydrop_ptr(&this as *const ManuallyDrop<Self>) }
+    }
+
+    /// Read encoded raw parts from a `ManuallyDrop<Self>` pointer.
+    pub(crate) const unsafe fn raw_parts_from_manuallydrop_ptr(
+        this: *const ManuallyDrop<Self>,
+    ) -> RawParts {
+        let this_ptr = this as *const Self;
         unsafe {
-            // Read the packed fields without moving the value out.
-            (
-                (*this_ptr).raw_ptr,
-                (*this_ptr).len_and_tag & Self::LEN_MASK,
-                (*this_ptr).len_and_tag & Self::TAG_MASK,
-            )
+            RawParts {
+                raw_ptr: ptr::read(ptr::addr_of!((*this_ptr).raw_ptr)),
+                len_and_tag: ptr::read(ptr::addr_of!((*this_ptr).len_and_tag)),
+            }
         }
     }
 
     /// Convert the value into a raw `*const str`.
     ///
-    /// The caller takes over ownership and must free it correctly.
+    /// # Safety
+    ///
+    /// The returned pointer is ambiguous: it may represent either borrowed
+    /// string data or backend-managed shared storage.
+    ///
+    /// Only pointers originating from a shared value may be used with backend
+    /// strong-count operations or reconstructed as backend shared handles.
+    ///
+    /// If you need to branch on ownership state, prefer
+    /// [`into_raw_parts`](Self::into_raw_parts) or
+    /// [`into_raw_shared`](Self::into_raw_shared).
     pub const unsafe fn into_raw(self) -> *const str {
-        let (raw_ptr, len, _) = unsafe { self.into_raw_parts() };
-        ptr::slice_from_raw_parts(raw_ptr.as_ptr(), len) as *const str
+        unsafe { self.into_raw_parts_struct().into_raw() }
+    }
+
+    /// Convert into a raw pointer only when the value is shared.
+    ///
+    /// Returns `None` for borrowed values, avoiding ambiguous raw pointers in
+    /// mixed borrowed/shared code paths.
+    pub fn into_raw_shared(self) -> Option<*const str> {
+        if self.is_shared() {
+            Some(unsafe { self.into_raw() })
+        } else {
+            None
+        }
     }
 
     /// Increment the strong count for a raw `*const str`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must come from a shared value of this backend. Passing a pointer
+    /// derived from a borrowed value is undefined behavior.
     pub unsafe fn increment_strong_count(ptr: *const str) {
         unsafe {
             B::increment_strong_count(ptr);
@@ -252,7 +375,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
 
     /// Convert the string into a boxed string slice.
     pub fn into_boxed_str(self) -> Box<str> {
-        self.into_string().into_boxed_str()
+        Box::from(self.as_str())
     }
 
     /// Convert the string into `String`.
@@ -270,18 +393,24 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
 
     /// Convert the string into `&str` without checking if it's borrowed.
     pub unsafe fn into_str_unchecked(self) -> &'a str {
-        unsafe { &*self.into_raw() }
+        debug_assert!(
+            self.is_borrowed(),
+            "into_str_unchecked requires a borrowed value"
+        );
+        let (raw_ptr, len, _) = unsafe { self.into_raw_parts() };
+        unsafe { &*(ptr::slice_from_raw_parts(raw_ptr.as_ptr(), len) as *const str) }
     }
 
     /// Convert the string into a `Cow<str>`.
     ///
     /// Borrowed values stay borrowed. Shared values allocate a new owned
     /// string because `Cow<'a, str>` cannot borrow from `Rc<str>` or `Arc<str>`.
-    pub fn as_cow(&'a self) -> Cow<'a, str> {
+    pub fn as_cow(&self) -> Cow<'a, str> {
         if self.is_shared() {
             Cow::Owned(self.to_string())
         } else {
-            Cow::Borrowed(self.as_str())
+            // Extend borrow to `'a` without tying it to `&self` lifetime.
+            unsafe { Cow::Borrowed(self.clone().into_str_unchecked()) }
         }
     }
 }
@@ -290,6 +419,16 @@ impl<B: RefCountBackend> RefStrCore<'static, B> {
     /// Build from a static `&str`.
     pub fn from_static(s: &'static str) -> Self {
         Self::from_str(s)
+    }
+
+    /// Return the borrowed `'static` string when this value is not shared.
+    pub fn borrowed_static_str(&self) -> Option<&'static str> {
+        if self.is_shared() {
+            None
+        } else {
+            let slice = ptr::slice_from_raw_parts(self.data_ptr(), self.len()) as *const str;
+            Some(unsafe { &*slice })
+        }
     }
 }
 
@@ -355,7 +494,7 @@ impl<'a, B: RefCountBackend> From<Box<str>> for RefStrCore<'a, B> {
 impl<'a, B: RefCountBackend> From<String> for RefStrCore<'a, B> {
     /// Build a local string from `String`.
     fn from(value: String) -> Self {
-        Self::from_shared(B::from_boxed_str(value.into_boxed_str()))
+        Self::from_shared(B::from_string(value))
     }
 }
 
@@ -453,7 +592,20 @@ impl<'a, B: RefCountBackend> Deref for RefStrCore<'a, B> {
 impl<'a, B: RefCountBackend> fmt::Debug for RefStrCore<'a, B> {
     /// Format as a debug tuple.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("RefStrCore").field(&self.as_str()).finish()
+        if f.alternate() {
+            let state = if self.is_shared() {
+                "Shared"
+            } else {
+                "Borrowed"
+            };
+            f.debug_struct("RefStrCore")
+                .field("state", &state)
+                .field("len", &self.len())
+                .field("value", &self.as_str())
+                .finish()
+        } else {
+            f.debug_tuple("RefStrCore").field(&self.as_str()).finish()
+        }
     }
 }
 

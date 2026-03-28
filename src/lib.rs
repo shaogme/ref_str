@@ -43,6 +43,8 @@
 //! - string access through [`as_str`](RefStr::as_str), [`as_cow`](RefStr::as_cow),
 //!   [`into_cow`](RefStr::into_cow), [`into_string`](RefStr::into_string),
 //!   [`into_boxed_str`](RefStr::into_boxed_str), and [`into_bytes`](RefStr::into_bytes)
+//! - content-based comparisons with `&str`, [`String`], [`Cow<'_, str>`][Cow],
+//!   [`Rc<str>`], and [`Arc<str>`] through [`PartialEq`]
 //!
 //! # Allocation Notes
 //!
@@ -61,10 +63,19 @@
 //! Advanced raw-pointer escape hatches are available through
 //! [`into_raw_parts`](RefStr::into_raw_parts),
 //! [`from_raw_parts`](RefStr::from_raw_parts), [`into_raw`](RefStr::into_raw),
-//! and [`increment_strong_count`](RefStr::increment_strong_count).
+//! [`into_raw_shared`](RefStr::into_raw_shared), and
+//! [`increment_strong_count`](RefStr::increment_strong_count).
 //!
 //! These APIs are `unsafe`: callers must preserve the original backend,
 //! ownership rules, and encoded tag values.
+//!
+//! [`into_raw`](RefStr::into_raw) is intentionally low-level: its returned
+//! `*const str` may point to either borrowed data or shared backend storage. If
+//! you need a raw pointer that is guaranteed to come from shared storage,
+//! prefer [`into_raw_shared`](RefStr::into_raw_shared). Passing a borrowed
+//! pointer from `into_raw` into
+//! [`increment_strong_count`](RefStr::increment_strong_count) is undefined
+//! behavior.
 //!
 //! # Examples
 //!
@@ -176,14 +187,26 @@ macro_rules! impl_ref_str_common {
             }
 
             #[inline]
-            const unsafe fn into_inner(self) -> crate::core::RefStrCore<$lt, $backend> {
+            const unsafe fn into_raw_parts_struct(self) -> crate::core::RawParts {
                 let this = ManuallyDrop::new(self);
                 let this_ptr = &this as *const ManuallyDrop<Self> as *const Self;
+                let inner_ptr = unsafe {
+                    ptr::addr_of!((*this_ptr).0)
+                        as *const ManuallyDrop<crate::core::RefStrCore<$lt, $backend>>
+                };
 
                 unsafe {
-                    ptr::read(
-                        (&(*this_ptr).0 as *const ManuallyDrop<crate::core::RefStrCore<$lt, $backend>>)
-                            as *const crate::core::RefStrCore<$lt, $backend>,
+                    <crate::core::RefStrCore<$lt, $backend>>::raw_parts_from_manuallydrop_ptr(
+                        inner_ptr,
+                    )
+                }
+            }
+
+            #[inline]
+            const unsafe fn into_inner(self) -> crate::core::RefStrCore<$lt, $backend> {
+                unsafe {
+                    <crate::core::RefStrCore<$lt, $backend>>::from_raw_parts_struct(
+                        self.into_raw_parts_struct(),
                     )
                 }
             }
@@ -250,18 +273,35 @@ macro_rules! impl_ref_str_common {
             /// release the underlying shared allocation exactly once.
             #[inline]
             pub const unsafe fn into_raw_parts(self) -> (NonNull<u8>, usize, usize) {
-                unsafe { <crate::core::RefStrCore<$lt, $backend>>::into_raw_parts(self.into_inner()) }
+                unsafe { self.into_raw_parts_struct().into_tuple() }
             }
 
             /// Convert this value into a raw `*const str`.
             ///
             /// # Safety
             ///
-            /// The returned pointer transfers ownership responsibilities to the caller. It must be
-            /// converted back into the matching shared backend or otherwise released exactly once.
+            /// The returned pointer is ambiguous: it may represent either borrowed data or shared
+            /// backend storage.
+            ///
+            /// Only pointers originating from shared values may be used with
+            /// [`increment_strong_count`](Self::increment_strong_count) or reconstructed into backend
+            /// shared handles.
+            ///
+            /// If you need to branch on ownership state, prefer
+            /// [`into_raw_parts`](Self::into_raw_parts) or
+            /// [`into_raw_shared`](Self::into_raw_shared).
             #[inline]
             pub const unsafe fn into_raw(self) -> *const str {
-                unsafe { <crate::core::RefStrCore<$lt, $backend>>::into_raw(self.into_inner()) }
+                unsafe { self.into_raw_parts_struct().into_raw() }
+            }
+
+            /// Convert into a raw pointer only when this value is shared.
+            ///
+            /// Returns `None` for borrowed values, avoiding ambiguous raw pointers in mixed
+            /// borrowed/shared code paths.
+            #[inline]
+            pub fn into_raw_shared(self) -> Option<*const str> {
+                unsafe { self.into_inner() }.into_raw_shared()
             }
 
             /// Increment the strong count for a raw pointer produced by [`into_raw`](Self::into_raw).
@@ -441,9 +481,22 @@ macro_rules! impl_ref_str_common {
         impl $($impl_generics)* fmt::Debug for $ty {
             /// Formats the type and its string contents for debugging.
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_tuple(stringify!($ty))
-                    .field(&self.as_str())
-                    .finish()
+                if f.alternate() {
+                    let state = if self.is_shared() {
+                        "Shared"
+                    } else {
+                        "Borrowed"
+                    };
+                    f.debug_struct(stringify!($ty))
+                        .field("state", &state)
+                        .field("len", &self.len())
+                        .field("value", &self.as_str())
+                        .finish()
+                } else {
+                    f.debug_tuple(stringify!($ty))
+                        .field(&self.as_str())
+                        .finish()
+                }
             }
         }
 
@@ -677,7 +730,7 @@ impl_ref_str_common! {
         /// Borrowed values stay borrowed. Shared values allocate and clone into
         /// an owned string to satisfy the borrow semantics of `Cow`.
         #[inline]
-        pub fn as_cow(&'a self) -> Cow<'a, str> {
+        pub fn as_cow(&self) -> Cow<'a, str> {
             self.inner().as_cow()
         }
     }
@@ -694,7 +747,7 @@ impl_ref_str_common! {
         /// Borrowed values stay borrowed. Shared values allocate and clone into
         /// an owned string to satisfy the borrow semantics of `Cow`.
         #[inline]
-        pub fn as_cow(&'a self) -> Cow<'a, str> {
+        pub fn as_cow(&self) -> Cow<'a, str> {
             self.inner().as_cow()
         }
     }
@@ -744,6 +797,90 @@ impl_ref_str_non_static!(RefStr<'a>, crate::core::SharedBackend, Arc<str>);
 impl_ref_str_non_static!(LocalRefStr<'a>, crate::core::LocalBackend, Rc<str>);
 impl_ref_str_static!(StaticRefStr, crate::core::SharedBackend, Arc<str>);
 impl_ref_str_static!(LocalStaticRefStr, crate::core::LocalBackend, Rc<str>);
+
+impl<'a, 'b> PartialEq<Cow<'b, str>> for RefStr<'a> {
+    /// Compares against [`Cow<str>`][Cow] by string contents.
+    fn eq(&self, other: &Cow<'b, str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'a, 'b> PartialEq<Cow<'b, str>> for LocalRefStr<'a> {
+    /// Compares against [`Cow<str>`][Cow] by string contents.
+    fn eq(&self, other: &Cow<'b, str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'b> PartialEq<Cow<'b, str>> for StaticRefStr {
+    /// Compares against [`Cow<str>`][Cow] by string contents.
+    fn eq(&self, other: &Cow<'b, str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'b> PartialEq<Cow<'b, str>> for LocalStaticRefStr {
+    /// Compares against [`Cow<str>`][Cow] by string contents.
+    fn eq(&self, other: &Cow<'b, str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'a> PartialEq<Arc<str>> for RefStr<'a> {
+    /// Compares against [`Arc<str>`] by string contents.
+    fn eq(&self, other: &Arc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'a> PartialEq<Rc<str>> for RefStr<'a> {
+    /// Compares against [`Rc<str>`] by string contents.
+    fn eq(&self, other: &Rc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'a> PartialEq<Arc<str>> for LocalRefStr<'a> {
+    /// Compares against [`Arc<str>`] by string contents.
+    fn eq(&self, other: &Arc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl<'a> PartialEq<Rc<str>> for LocalRefStr<'a> {
+    /// Compares against [`Rc<str>`] by string contents.
+    fn eq(&self, other: &Rc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl PartialEq<Arc<str>> for StaticRefStr {
+    /// Compares against [`Arc<str>`] by string contents.
+    fn eq(&self, other: &Arc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl PartialEq<Rc<str>> for StaticRefStr {
+    /// Compares against [`Rc<str>`] by string contents.
+    fn eq(&self, other: &Rc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl PartialEq<Arc<str>> for LocalStaticRefStr {
+    /// Compares against [`Arc<str>`] by string contents.
+    fn eq(&self, other: &Arc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl PartialEq<Rc<str>> for LocalStaticRefStr {
+    /// Compares against [`Rc<str>`] by string contents.
+    fn eq(&self, other: &Rc<str>) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
 
 impl<'a> From<LocalRefStr<'a>> for RefStr<'a> {
     /// Converts the local `Rc`-backed variant into the thread-safe `Arc`-backed variant.
