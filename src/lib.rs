@@ -425,28 +425,7 @@ macro_rules! impl_ref_str_common {
             }
         }
 
-        impl $($impl_generics)* PartialEq for $ty {
-            /// Compares by string contents.
-            fn eq(&self, other: &Self) -> bool {
-                self.as_str() == other.as_str()
-            }
-        }
-
         impl $($impl_generics)* Eq for $ty {}
-
-        impl $($impl_generics)* PartialEq<&str> for $ty {
-            /// Compares against a string slice.
-            fn eq(&self, other: &&str) -> bool {
-                self.as_str() == *other
-            }
-        }
-
-        impl $($impl_generics)* PartialEq<String> for $ty {
-            /// Compares against an owned string.
-            fn eq(&self, other: &String) -> bool {
-                self.as_str() == other.as_str()
-            }
-        }
 
         impl $($impl_generics)* PartialOrd for $ty {
             /// Performs lexicographic comparison.
@@ -719,6 +698,66 @@ macro_rules! impl_ref_str_static {
     };
 }
 
+macro_rules! impl_ref_str_partial_eqs {
+    (for $lhs:ty { $([$($impl_generics:tt)*] $rhs:ty => |$lhs_ref:ident, $other:ident| $compare:expr;)+ }) => {
+        $(
+            impl_ref_str_partial_eqs!(@single [$($impl_generics)*] $lhs => $rhs, |$lhs_ref, $other| $compare);
+        )+
+    };
+    (@single [] $lhs:ty => $rhs:ty, |$lhs_ref:ident, $other:ident| $compare:expr) => {
+        impl PartialEq<$rhs> for $lhs {
+            fn eq(&self, other: &$rhs) -> bool {
+                let $lhs_ref = self;
+                let $other = other;
+                $compare
+            }
+        }
+
+        impl PartialEq<$rhs> for &$lhs {
+            fn eq(&self, other: &$rhs) -> bool {
+                let $lhs_ref = *self;
+                let $other = other;
+                $compare
+            }
+        }
+
+        impl PartialEq<&$rhs> for $lhs {
+            fn eq(&self, other: &&$rhs) -> bool {
+                let $lhs_ref = self;
+                let $other = *other;
+                $compare
+            }
+        }
+
+    };
+    (@single [$($impl_generics:tt)+] $lhs:ty => $rhs:ty, |$lhs_ref:ident, $other:ident| $compare:expr) => {
+        impl<$($impl_generics)+> PartialEq<$rhs> for $lhs {
+            fn eq(&self, other: &$rhs) -> bool {
+                let $lhs_ref = self;
+                let $other = other;
+                $compare
+            }
+        }
+
+        impl<$($impl_generics)+> PartialEq<$rhs> for &$lhs {
+            fn eq(&self, other: &$rhs) -> bool {
+                let $lhs_ref = *self;
+                let $other = other;
+                $compare
+            }
+        }
+
+        impl<$($impl_generics)+> PartialEq<&$rhs> for $lhs {
+            fn eq(&self, other: &&$rhs) -> bool {
+                let $lhs_ref = self;
+                let $other = *other;
+                $compare
+            }
+        }
+
+    };
+}
+
 impl_ref_str_common! {
     impl [<'a>] RefStr<'a> {
         lifetime = 'a;
@@ -798,87 +837,47 @@ impl_ref_str_non_static!(LocalRefStr<'a>, crate::core::LocalBackend, Rc<str>);
 impl_ref_str_static!(StaticRefStr, crate::core::SharedBackend, Arc<str>);
 impl_ref_str_static!(LocalStaticRefStr, crate::core::LocalBackend, Rc<str>);
 
-impl<'a, 'b> PartialEq<Cow<'b, str>> for RefStr<'a> {
-    /// Compares against [`Cow<str>`][Cow] by string contents.
-    fn eq(&self, other: &Cow<'b, str>) -> bool {
-        self.as_str() == other.as_ref()
+impl_ref_str_partial_eqs! {
+    for RefStr<'a> {
+        ['a] RefStr<'a> => |lhs, other| lhs.as_str() == other.as_str();
+        ['a] &str => |lhs, other| lhs.as_str() == *other;
+        ['a] String => |lhs, other| lhs.as_str() == other.as_str();
+        ['a, 'b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
+        ['a] Arc<str> => |lhs, other| lhs.as_str() == other.as_ref();
+        ['a] Rc<str> => |lhs, other| lhs.as_str() == other.as_ref();
     }
 }
 
-impl<'a, 'b> PartialEq<Cow<'b, str>> for LocalRefStr<'a> {
-    /// Compares against [`Cow<str>`][Cow] by string contents.
-    fn eq(&self, other: &Cow<'b, str>) -> bool {
-        self.as_str() == other.as_ref()
+impl_ref_str_partial_eqs! {
+    for LocalRefStr<'a> {
+        ['a] LocalRefStr<'a> => |lhs, other| lhs.as_str() == other.as_str();
+        ['a] &str => |lhs, other| lhs.as_str() == *other;
+        ['a] String => |lhs, other| lhs.as_str() == other.as_str();
+        ['a, 'b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
+        ['a] Arc<str> => |lhs, other| lhs.as_str() == other.as_ref();
+        ['a] Rc<str> => |lhs, other| lhs.as_str() == other.as_ref();
     }
 }
 
-impl<'b> PartialEq<Cow<'b, str>> for StaticRefStr {
-    /// Compares against [`Cow<str>`][Cow] by string contents.
-    fn eq(&self, other: &Cow<'b, str>) -> bool {
-        self.as_str() == other.as_ref()
+impl_ref_str_partial_eqs! {
+    for StaticRefStr {
+        [] StaticRefStr => |lhs, other| lhs.as_str() == other.as_str();
+        [] &str => |lhs, other| lhs.as_str() == *other;
+        [] String => |lhs, other| lhs.as_str() == other.as_str();
+        ['b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
+        [] Arc<str> => |lhs, other| lhs.as_str() == other.as_ref();
+        [] Rc<str> => |lhs, other| lhs.as_str() == other.as_ref();
     }
 }
 
-impl<'b> PartialEq<Cow<'b, str>> for LocalStaticRefStr {
-    /// Compares against [`Cow<str>`][Cow] by string contents.
-    fn eq(&self, other: &Cow<'b, str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl<'a> PartialEq<Arc<str>> for RefStr<'a> {
-    /// Compares against [`Arc<str>`] by string contents.
-    fn eq(&self, other: &Arc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl<'a> PartialEq<Rc<str>> for RefStr<'a> {
-    /// Compares against [`Rc<str>`] by string contents.
-    fn eq(&self, other: &Rc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl<'a> PartialEq<Arc<str>> for LocalRefStr<'a> {
-    /// Compares against [`Arc<str>`] by string contents.
-    fn eq(&self, other: &Arc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl<'a> PartialEq<Rc<str>> for LocalRefStr<'a> {
-    /// Compares against [`Rc<str>`] by string contents.
-    fn eq(&self, other: &Rc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl PartialEq<Arc<str>> for StaticRefStr {
-    /// Compares against [`Arc<str>`] by string contents.
-    fn eq(&self, other: &Arc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl PartialEq<Rc<str>> for StaticRefStr {
-    /// Compares against [`Rc<str>`] by string contents.
-    fn eq(&self, other: &Rc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl PartialEq<Arc<str>> for LocalStaticRefStr {
-    /// Compares against [`Arc<str>`] by string contents.
-    fn eq(&self, other: &Arc<str>) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl PartialEq<Rc<str>> for LocalStaticRefStr {
-    /// Compares against [`Rc<str>`] by string contents.
-    fn eq(&self, other: &Rc<str>) -> bool {
-        self.as_str() == other.as_ref()
+impl_ref_str_partial_eqs! {
+    for LocalStaticRefStr {
+        [] LocalStaticRefStr => |lhs, other| lhs.as_str() == other.as_str();
+        [] &str => |lhs, other| lhs.as_str() == *other;
+        [] String => |lhs, other| lhs.as_str() == other.as_str();
+        ['b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
+        [] Arc<str> => |lhs, other| lhs.as_str() == other.as_ref();
+        [] Rc<str> => |lhs, other| lhs.as_str() == other.as_ref();
     }
 }
 

@@ -60,6 +60,50 @@ macro_rules! lifetime_wrapper_suite {
             }
 
             #[test]
+            fn reference_lhs_partial_eq_roundtrip() {
+                let borrowed_owner = String::from("borrowed");
+                let borrowed = Sut::from(&borrowed_owner[..]);
+
+                assert!((&borrowed) == borrowed.clone());
+                assert!((&borrowed) == "borrowed");
+                assert!((&borrowed) == String::from("borrowed"));
+                assert!((&borrowed) == Cow::Borrowed("borrowed"));
+                assert!((&borrowed) == std::sync::Arc::<str>::from("borrowed"));
+                assert!((&borrowed) == std::rc::Rc::<str>::from("borrowed"));
+
+                let shared = Sut::from_shared(($make_shared)("shared"));
+
+                assert!((&shared) == shared.clone());
+                assert!((&shared) == "shared");
+                assert!((&shared) == String::from("shared"));
+                assert!((&shared) == Cow::Owned(String::from("shared")));
+                assert!((&shared) == std::sync::Arc::<str>::from("shared"));
+                assert!((&shared) == std::rc::Rc::<str>::from("shared"));
+            }
+
+            #[test]
+            fn rhs_reference_partial_eq_roundtrip() {
+                let borrowed_owner = String::from("borrowed");
+                let borrowed = Sut::from(&borrowed_owner[..]);
+                let borrowed_cow = Cow::Borrowed("borrowed");
+                let borrowed_arc = std::sync::Arc::<str>::from("borrowed");
+                let borrowed_rc = std::rc::Rc::<str>::from("borrowed");
+
+                assert!(borrowed == &borrowed_cow);
+                assert!(borrowed == &borrowed_arc);
+                assert!(borrowed == &borrowed_rc);
+
+                let shared = Sut::from_shared(($make_shared)("shared"));
+                let shared_cow = Cow::Owned(String::from("shared"));
+                let shared_arc = std::sync::Arc::<str>::from("shared");
+                let shared_rc = std::rc::Rc::<str>::from("shared");
+
+                assert!(shared == &shared_cow);
+                assert!(shared == &shared_arc);
+                assert!(shared == &shared_rc);
+            }
+
+            #[test]
             fn into_raw_shared_disambiguates_state() {
                 let borrowed_owner = String::from("borrowed");
                 let borrowed = Sut::from(&borrowed_owner[..]);
@@ -226,6 +270,48 @@ macro_rules! static_wrapper_suite {
                 let cloned = value.clone();
                 assert_eq!(cloned.as_str(), "hello");
                 assert_eq!($strong_count(&original), 3);
+            }
+
+            #[test]
+            fn reference_lhs_partial_eq_roundtrip() {
+                let borrowed = Sut::from_static("borrowed");
+
+                assert!((&borrowed) == borrowed.clone());
+                assert!((&borrowed) == "borrowed");
+                assert!((&borrowed) == String::from("borrowed"));
+                assert!((&borrowed) == Cow::Borrowed("borrowed"));
+                assert!((&borrowed) == std::sync::Arc::<str>::from("borrowed"));
+                assert!((&borrowed) == std::rc::Rc::<str>::from("borrowed"));
+
+                let shared = Sut::from_shared(($make_shared)("shared"));
+
+                assert!((&shared) == shared.clone());
+                assert!((&shared) == "shared");
+                assert!((&shared) == String::from("shared"));
+                assert!((&shared) == Cow::Owned(String::from("shared")));
+                assert!((&shared) == std::sync::Arc::<str>::from("shared"));
+                assert!((&shared) == std::rc::Rc::<str>::from("shared"));
+            }
+
+            #[test]
+            fn rhs_reference_partial_eq_roundtrip() {
+                let borrowed = Sut::from_static("borrowed");
+                let borrowed_cow = Cow::Borrowed("borrowed");
+                let borrowed_arc = std::sync::Arc::<str>::from("borrowed");
+                let borrowed_rc = std::rc::Rc::<str>::from("borrowed");
+
+                assert!(borrowed == &borrowed_cow);
+                assert!(borrowed == &borrowed_arc);
+                assert!(borrowed == &borrowed_rc);
+
+                let shared = Sut::from_shared(($make_shared)("shared"));
+                let shared_cow = Cow::Owned(String::from("shared"));
+                let shared_arc = std::sync::Arc::<str>::from("shared");
+                let shared_rc = std::rc::Rc::<str>::from("shared");
+
+                assert!(shared == &shared_cow);
+                assert!(shared == &shared_arc);
+                assert!(shared == &shared_rc);
             }
 
             #[test]
