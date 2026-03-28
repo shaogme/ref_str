@@ -66,7 +66,7 @@
 //! [`into_raw_shared`](RefStr::into_raw_shared), and
 //! [`increment_strong_count`](RefStr::increment_strong_count).
 //!
-//! These APIs are `unsafe`: callers must preserve the original backend,
+//! Most of these APIs are `unsafe`: callers must preserve the original backend,
 //! ownership rules, and encoded tag values.
 //!
 //! [`into_raw`](RefStr::into_raw) is intentionally low-level: its returned

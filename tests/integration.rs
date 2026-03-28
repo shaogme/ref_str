@@ -24,13 +24,16 @@ macro_rules! lifetime_wrapper_suite {
             fn borrowed_roundtrip() {
                 let owned = String::from("borrowed");
                 let value = Sut::from(&owned[..]);
+                let borrowed_cow = Cow::Borrowed("borrowed");
+                let borrowed_arc = std::sync::Arc::<str>::from("borrowed");
+                let borrowed_rc = std::rc::Rc::<str>::from("borrowed");
 
                 assert_eq!(value.as_str(), "borrowed");
                 assert!(value.is_borrowed());
                 assert_eq!(value.as_cow(), Cow::Borrowed("borrowed"));
-                assert!(value == Cow::Borrowed("borrowed"));
-                assert!(value == std::sync::Arc::<str>::from("borrowed"));
-                assert!(value == std::rc::Rc::<str>::from("borrowed"));
+                assert!(value == &borrowed_cow);
+                assert!(value == &borrowed_arc);
+                assert!(value == &borrowed_rc);
             }
 
             #[test]
@@ -48,11 +51,12 @@ macro_rules! lifetime_wrapper_suite {
             fn shared_roundtrip() {
                 let original: $shared = ($make_shared)("hello");
                 let value = Sut::from_shared(original.clone());
+                let expected_cow = Cow::Owned(String::from("hello"));
 
                 assert_eq!(value.as_str(), "hello");
                 assert!(value.is_shared());
                 assert_eq!($strong_count(&original), 2);
-                assert!(value == Cow::Owned(String::from("hello")));
+                assert!(value == &expected_cow);
 
                 let cloned = value.clone();
                 assert_eq!(cloned.as_str(), "hello");
@@ -63,22 +67,30 @@ macro_rules! lifetime_wrapper_suite {
             fn reference_lhs_partial_eq_roundtrip() {
                 let borrowed_owner = String::from("borrowed");
                 let borrowed = Sut::from(&borrowed_owner[..]);
+                let borrowed_string = String::from("borrowed");
+                let borrowed_cow = Cow::Borrowed("borrowed");
+                let borrowed_arc = std::sync::Arc::<str>::from("borrowed");
+                let borrowed_rc = std::rc::Rc::<str>::from("borrowed");
 
                 assert!((&borrowed) == borrowed.clone());
                 assert!((&borrowed) == "borrowed");
-                assert!((&borrowed) == String::from("borrowed"));
-                assert!((&borrowed) == Cow::Borrowed("borrowed"));
-                assert!((&borrowed) == std::sync::Arc::<str>::from("borrowed"));
-                assert!((&borrowed) == std::rc::Rc::<str>::from("borrowed"));
+                assert!((&borrowed) == &borrowed_string);
+                assert!((&borrowed) == &borrowed_cow);
+                assert!((&borrowed) == &borrowed_arc);
+                assert!((&borrowed) == &borrowed_rc);
 
                 let shared = Sut::from_shared(($make_shared)("shared"));
+                let shared_string = String::from("shared");
+                let shared_cow = Cow::Owned(String::from("shared"));
+                let shared_arc = std::sync::Arc::<str>::from("shared");
+                let shared_rc = std::rc::Rc::<str>::from("shared");
 
                 assert!((&shared) == shared.clone());
                 assert!((&shared) == "shared");
-                assert!((&shared) == String::from("shared"));
-                assert!((&shared) == Cow::Owned(String::from("shared")));
-                assert!((&shared) == std::sync::Arc::<str>::from("shared"));
-                assert!((&shared) == std::rc::Rc::<str>::from("shared"));
+                assert!((&shared) == &shared_string);
+                assert!((&shared) == &shared_cow);
+                assert!((&shared) == &shared_arc);
+                assert!((&shared) == &shared_rc);
             }
 
             #[test]
@@ -236,14 +248,17 @@ macro_rules! static_wrapper_suite {
             fn borrowed_roundtrip() {
                 let value = Sut::from_static("borrowed");
                 let default_value: Sut = Default::default();
+                let borrowed_cow = Cow::Borrowed("borrowed");
+                let borrowed_arc = std::sync::Arc::<str>::from("borrowed");
+                let borrowed_rc = std::rc::Rc::<str>::from("borrowed");
 
                 assert_eq!(value.as_str(), "borrowed");
                 assert!(value.is_borrowed());
                 assert!(default_value.is_borrowed());
                 assert_eq!(default_value.as_str(), "");
-                assert!(value == Cow::Borrowed("borrowed"));
-                assert!(value == std::sync::Arc::<str>::from("borrowed"));
-                assert!(value == std::rc::Rc::<str>::from("borrowed"));
+                assert!(value == &borrowed_cow);
+                assert!(value == &borrowed_arc);
+                assert!(value == &borrowed_rc);
             }
 
             #[test]
@@ -261,11 +276,12 @@ macro_rules! static_wrapper_suite {
             fn shared_roundtrip() {
                 let original: $shared = ($make_shared)("hello");
                 let value = Sut::from_shared(original.clone());
+                let expected_cow = Cow::Owned(String::from("hello"));
 
                 assert_eq!(value.as_str(), "hello");
                 assert!(value.is_shared());
                 assert_eq!($strong_count(&original), 2);
-                assert!(value == Cow::Owned(String::from("hello")));
+                assert!(value == &expected_cow);
 
                 let cloned = value.clone();
                 assert_eq!(cloned.as_str(), "hello");
@@ -275,22 +291,30 @@ macro_rules! static_wrapper_suite {
             #[test]
             fn reference_lhs_partial_eq_roundtrip() {
                 let borrowed = Sut::from_static("borrowed");
+                let borrowed_string = String::from("borrowed");
+                let borrowed_cow = Cow::Borrowed("borrowed");
+                let borrowed_arc = std::sync::Arc::<str>::from("borrowed");
+                let borrowed_rc = std::rc::Rc::<str>::from("borrowed");
 
                 assert!((&borrowed) == borrowed.clone());
                 assert!((&borrowed) == "borrowed");
-                assert!((&borrowed) == String::from("borrowed"));
-                assert!((&borrowed) == Cow::Borrowed("borrowed"));
-                assert!((&borrowed) == std::sync::Arc::<str>::from("borrowed"));
-                assert!((&borrowed) == std::rc::Rc::<str>::from("borrowed"));
+                assert!((&borrowed) == &borrowed_string);
+                assert!((&borrowed) == &borrowed_cow);
+                assert!((&borrowed) == &borrowed_arc);
+                assert!((&borrowed) == &borrowed_rc);
 
                 let shared = Sut::from_shared(($make_shared)("shared"));
+                let shared_string = String::from("shared");
+                let shared_cow = Cow::Owned(String::from("shared"));
+                let shared_arc = std::sync::Arc::<str>::from("shared");
+                let shared_rc = std::rc::Rc::<str>::from("shared");
 
                 assert!((&shared) == shared.clone());
                 assert!((&shared) == "shared");
-                assert!((&shared) == String::from("shared"));
-                assert!((&shared) == Cow::Owned(String::from("shared")));
-                assert!((&shared) == std::sync::Arc::<str>::from("shared"));
-                assert!((&shared) == std::rc::Rc::<str>::from("shared"));
+                assert!((&shared) == &shared_string);
+                assert!((&shared) == &shared_cow);
+                assert!((&shared) == &shared_arc);
+                assert!((&shared) == &shared_rc);
             }
 
             #[test]
@@ -427,7 +451,7 @@ lifetime_wrapper_suite!(
     local_ref_str,
     LocalRefStr,
     std::rc::Rc<str>,
-    |s| std::rc::Rc::<str>::from(s),
+    std::rc::Rc::<str>::from,
     std::rc::Rc::strong_count,
     std::rc::Rc::<str>::from_raw,
     RefStr
@@ -437,7 +461,7 @@ lifetime_wrapper_suite!(
     shared_ref_str,
     RefStr,
     std::sync::Arc<str>,
-    |s| std::sync::Arc::<str>::from(s),
+    std::sync::Arc::<str>::from,
     std::sync::Arc::strong_count,
     std::sync::Arc::<str>::from_raw,
     LocalRefStr
@@ -447,7 +471,7 @@ static_wrapper_suite!(
     local_static_ref_str,
     LocalStaticRefStr,
     std::rc::Rc<str>,
-    |s| std::rc::Rc::<str>::from(s),
+    std::rc::Rc::<str>::from,
     std::rc::Rc::strong_count,
     std::rc::Rc::<str>::from_raw,
     StaticRefStr,
@@ -458,7 +482,7 @@ static_wrapper_suite!(
     shared_static_ref_str,
     StaticRefStr,
     std::sync::Arc<str>,
-    |s| std::sync::Arc::<str>::from(s),
+    std::sync::Arc::<str>::from,
     std::sync::Arc::strong_count,
     std::sync::Arc::<str>::from_raw,
     LocalStaticRefStr,

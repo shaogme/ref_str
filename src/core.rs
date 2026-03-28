@@ -130,6 +130,10 @@ impl RawParts {
     /// Build encoded parts from already-validated fields.
     pub(crate) const unsafe fn new(raw_ptr: NonNull<u8>, len: usize, tag: usize) -> Self {
         assert!(len <= LEN_MASK, "string too large to compress");
+        assert!(
+            tag == 0 || tag == TAG_MASK,
+            "invalid tag for compressed string"
+        );
         Self {
             raw_ptr,
             len_and_tag: len | tag,
@@ -792,6 +796,14 @@ mod tests {
             drop(Arc::from_raw(raw));
         }
         assert_eq!(Arc::strong_count(&original), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid tag for compressed string")]
+    fn from_raw_parts_rejects_invalid_tag() {
+        let value = RefStr::from("hello");
+        let (raw_ptr, len, _) = unsafe { RefStr::into_raw_parts(value) };
+        let _ = unsafe { RefStr::from_raw_parts(raw_ptr, len, 1) };
     }
 
     #[test]
