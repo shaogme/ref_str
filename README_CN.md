@@ -73,6 +73,8 @@ ref_str = { version = "0.1", features = ["arbitrary"] }
 | `from_owned_like(impl AsRef<str>)` | 从字符串类输入分配并强制构造共享态 |
 | `from_shared(...)` | 从 `Rc<str>` 或 `Arc<str>` 构造 |
 | `from_static(&'static str)` | 构造借用态的 static wrapper |
+| `to_static_str()` | 提升为 `'static` 变体；共享态下克隆，借用态下分配 |
+| `into_static_str()` | 消耗并提升为 `'static`；共享态下转移所有权，借用态下分配 |
 | `is_borrowed()` / `is_shared()` | 检查当前存储状态 |
 | `len()` / `is_empty()` | 查询字符串长度 |
 | `as_str()` / `as_cow()` | 借用为 `&str` 或转成 `Cow<str>`；shared 态下 `as_cow()` 会复制 |
@@ -102,6 +104,7 @@ ref_str = { version = "0.1", features = ["arbitrary"] }
 - `into_cow()` 也遵循同样规则：借用态保持借用，shared 态转成拥有型字符串。
 - `LocalRefStr` 和 `RefStr` 之间的互转在借用态下不会分配。
 - `LocalRefStr` 和 `RefStr` 之间的互转如果源值已经是 shared 态，则会重新分配并复制，因为 `Rc<str>` 和 `Arc<str>` 后端不同。
+- `to_static_str()` 和 `into_static_str()` 仅在源值处于“借用态”时才会分配内存。如果值已经是“共享态”，它们仅执行轻量级的引用计数增加或所有权转移。
 
 ## 安全边界
 
@@ -229,6 +232,19 @@ use ref_str::RefStr;
 let value = RefStr::from_owned_like("hello");
 assert!(value.is_shared());
 assert_eq!(value.as_str(), "hello");
+```
+
+生命周期提升：
+
+```rust
+use ref_str::RefStr;
+
+let s = String::from("hello");
+let borrowed = RefStr::from(s.as_str()); 
+
+// 提升为 StaticRefStr (由于原本是借用态，此处会分配内存)
+let static_val = borrowed.into_static_str();
+assert!(static_val.is_shared());
 ```
 
 ## 说明

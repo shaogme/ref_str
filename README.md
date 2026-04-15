@@ -73,6 +73,8 @@ All four public types share the same core model:
 | `from_owned_like(impl AsRef<str>)` | Always allocate and build a shared value from string-like input |
 | `from_shared(...)` | Build from `Rc<str>` or `Arc<str>` |
 | `from_static(&'static str)` | Build a borrowed static wrapper |
+| `to_static_str()` | Promote to `'static` variant; clones shared or allocates borrowed |
+| `into_static_str()` | Consume and promote to `'static`; transfers shared or allocates borrowed |
 | `is_borrowed()` / `is_shared()` | Inspect the current storage mode |
 | `len()` / `is_empty()` | Inspect string length |
 | `as_str()` / `as_cow()` | Borrow as `&str` or convert to `Cow<str>`; `as_cow()` clones when shared |
@@ -102,6 +104,7 @@ All four public types share the same core model:
 - `into_cow()` follows the same rule: borrowed values stay borrowed, while shared values become owned strings.
 - Conversions between `LocalRefStr` and `RefStr` preserve borrowed values without allocation.
 - Conversions between `LocalRefStr` and `RefStr` allocate and copy when the source is already shared, because `Rc<str>` and `Arc<str>` use different backends.
+- `to_static_str()` and `into_static_str()` only allocate when the source is in the borrowed state. If the value is already shared, they perform a cheap reference count increment or an ownership transfer.
 
 ## Safety Boundaries
 
@@ -229,6 +232,19 @@ use ref_str::RefStr;
 let value = RefStr::from_owned_like("hello");
 assert!(value.is_shared());
 assert_eq!(value.as_str(), "hello");
+```
+
+Lifetime Promotion:
+
+```rust
+use ref_str::RefStr;
+
+let s = String::from("hello");
+let borrowed = RefStr::from(s.as_str()); 
+
+// Promote to StaticRefStr (allocates because it was borrowed)
+let static_val = borrowed.to_static_str();
+assert!(static_val.is_shared());
 ```
 
 ## Notes

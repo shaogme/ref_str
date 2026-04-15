@@ -772,6 +772,24 @@ impl_ref_str_common! {
         pub fn as_cow(&self) -> Cow<'a, str> {
             self.inner().as_cow()
         }
+
+        /// Convert to a static RefStr.
+        ///
+        /// If the value is shared, it will be cloned to increase the reference count.
+        /// If the value is borrowed, it will be converted to a shared value.
+        #[inline]
+        pub fn to_static_str(&self) -> StaticRefStr {
+            StaticRefStr::from_inner(self.inner().to_static_core())
+        }
+
+        /// Convert to a static RefStr.
+        ///
+        /// If the value is shared, it will be directly converted to a static RefStr.
+        /// If the value is borrowed, it will be converted to a shared value.
+        #[inline]
+        pub fn into_static_str(self) -> StaticRefStr {
+            StaticRefStr::from_inner(unsafe { self.into_inner() }.into_static_core())
+        }
     }
 }
 
@@ -788,6 +806,24 @@ impl_ref_str_common! {
         #[inline]
         pub fn as_cow(&self) -> Cow<'a, str> {
             self.inner().as_cow()
+        }
+
+        /// Convert to a static LocalRefStr.
+        ///
+        /// If the value is shared, it will be cloned to increase the reference count.
+        /// If the value is borrowed, it will be converted to a shared value.
+        #[inline]
+        pub fn to_static_str(&self) -> LocalStaticRefStr {
+            LocalStaticRefStr::from_inner(self.inner().to_static_core())
+        }
+
+        /// Convert to a static LocalRefStr.
+        ///
+        /// If the value is shared, it will be directly converted to a static RefStr.
+        /// If the value is borrowed, it will be converted to a shared value.
+        #[inline]
+        pub fn into_static_str(self) -> LocalStaticRefStr {
+            LocalStaticRefStr::from_inner(unsafe { self.into_inner() }.into_static_core())
         }
     }
 }

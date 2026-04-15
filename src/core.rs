@@ -372,6 +372,33 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
         }
     }
 
+    /// Convert to a static RefStrCore.
+    ///
+    /// If the value is shared, it will be cloned to increase the reference count.
+    /// If the value is borrowed, it will be converted to a shared value.
+    pub fn to_static_core(&self) -> RefStrCore<'static, B> {
+        if self.is_shared() {
+            let cloned = self.clone();
+            let (raw_ptr, len, tag) = unsafe { cloned.into_raw_parts() };
+            unsafe { RefStrCore::from_raw_parts(raw_ptr, len, tag) }
+        } else {
+            RefStrCore::from_shared(B::from_str(self.as_str()))
+        }
+    }
+
+    /// Convert to a static RefStrCore.
+    ///
+    /// If the value is shared, it will be directly converted to a static RefStrCore.
+    /// If the value is borrowed, it will be converted to a shared value.
+    pub fn into_static_core(self) -> RefStrCore<'static, B> {
+        if self.is_shared() {
+            let (raw_ptr, len, tag) = unsafe { self.into_raw_parts() };
+            unsafe { RefStrCore::from_raw_parts(raw_ptr, len, tag) }
+        } else {
+            RefStrCore::from_shared(B::from_str(self.as_str()))
+        }
+    }
+
     /// Convert the string into owned bytes.
     pub fn into_bytes(self) -> Vec<u8> {
         self.as_str().as_bytes().to_vec()

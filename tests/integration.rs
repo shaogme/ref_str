@@ -64,6 +64,34 @@ macro_rules! lifetime_wrapper_suite {
             }
 
             #[test]
+            fn static_promotion_roundtrip() {
+                let owned = String::from("borrowed");
+                let value = Sut::from(&owned[..]);
+                assert!(value.is_borrowed());
+
+                let promoted = value.to_static_str();
+                assert!(promoted.is_shared());
+                assert_eq!(promoted.as_str(), "borrowed");
+
+                let consumed = value.into_static_str();
+                assert!(consumed.is_shared());
+                assert_eq!(consumed.as_str(), "borrowed");
+
+                let original: $shared = ($make_shared)("shared");
+                let shared_val = Sut::from_shared(original.clone());
+                assert!(shared_val.is_shared());
+                assert_eq!($strong_count(&original), 2);
+
+                let promoted_shared = shared_val.to_static_str();
+                assert!(promoted_shared.is_shared());
+                assert_eq!($strong_count(&original), 3);
+
+                let consumed_shared = shared_val.into_static_str();
+                assert!(consumed_shared.is_shared());
+                assert_eq!($strong_count(&original), 3);
+            }
+
+            #[test]
             fn reference_lhs_partial_eq_roundtrip() {
                 let borrowed_owner = String::from("borrowed");
                 let borrowed = Sut::from(&borrowed_owner[..]);
