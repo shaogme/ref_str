@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::boxed::Box;
+use std::mem::size_of;
 use std::string::String;
 
 use ref_str::{LocalRefStr, LocalStaticRefStr, RefStr, StaticRefStr};
@@ -45,6 +46,7 @@ macro_rules! lifetime_wrapper_suite {
                 assert_eq!(from_string.clone().into_string(), "hello");
                 assert_eq!(from_box.into_boxed_str().as_ref(), "boxed");
                 assert_eq!(from_cow.as_str(), "cow");
+                assert!(from_string.is_inline());
             }
 
             #[test]
@@ -70,11 +72,17 @@ macro_rules! lifetime_wrapper_suite {
                 assert!(value.is_borrowed());
 
                 let promoted = value.to_static_str();
-                assert!(promoted.is_shared());
+                #[cfg(target_pointer_width = "64")]
+                assert!(promoted.is_inline());
+                #[cfg(not(target_pointer_width = "64"))]
+                assert!(!promoted.is_borrowed());
                 assert_eq!(promoted.as_str(), "borrowed");
 
                 let consumed = value.into_static_str();
-                assert!(consumed.is_shared());
+                #[cfg(target_pointer_width = "64")]
+                assert!(consumed.is_inline());
+                #[cfg(not(target_pointer_width = "64"))]
+                assert!(!consumed.is_borrowed());
                 assert_eq!(consumed.as_str(), "borrowed");
 
                 let original: $shared = ($make_shared)("shared");
@@ -144,6 +152,24 @@ macro_rules! lifetime_wrapper_suite {
             }
 
             #[test]
+            fn inline_partial_eq_and_hash_lookup_roundtrip() {
+                let left = Sut::from(String::from("tiny"));
+                let same = Sut::from(String::from("tiny"));
+                let different = Sut::from(String::from("tyne"));
+
+                assert!(left.is_inline());
+                assert!(same.is_inline());
+                assert!(different.is_inline());
+                assert!(left == same);
+                assert!(left != different);
+
+                let mut map = std::collections::HashMap::new();
+                map.insert(left.clone(), 7usize);
+
+                assert_eq!(map.get("tiny"), Some(&7usize));
+            }
+
+            #[test]
             fn into_raw_shared_disambiguates_state() {
                 let borrowed_owner = String::from("borrowed");
                 let borrowed = Sut::from(&borrowed_owner[..]);
@@ -189,12 +215,12 @@ macro_rules! lifetime_wrapper_suite {
             fn raw_roundtrip() {
                 let original: $shared = ($make_shared)("raw");
                 let value = Sut::from_shared(original.clone());
-                let (raw_ptr, len, tag) = unsafe { Sut::into_raw_parts(value) };
+                let parts = unsafe { Sut::into_raw_parts(value) };
 
-                assert_eq!(len, 3);
-                assert_ne!(tag, 0);
+                assert_eq!(parts.len(), 3);
+                assert!(parts.is_shared());
 
-                let value = unsafe { Sut::from_raw_parts(raw_ptr, len, tag) };
+                let value = unsafe { Sut::from_raw_parts(parts) };
                 let raw = unsafe { Sut::into_raw(value) };
 
                 assert_eq!($strong_count(&original), 2);
@@ -231,7 +257,7 @@ macro_rules! lifetime_wrapper_suite {
                 .unwrap();
 
                 assert!(borrowed.is_borrowed());
-                assert!(owned.is_shared());
+                assert!(!owned.is_borrowed());
                 assert_de_tokens(&borrowed, &[Token::BorrowedStr("serde")]);
             }
 
@@ -248,7 +274,7 @@ macro_rules! lifetime_wrapper_suite {
 
                 assert_eq!(shared_value.as_str(), "hello");
                 assert_eq!(borrowed_value.as_str(), "hello");
-                assert!(shared_value.is_shared());
+                assert!(!shared_value.is_borrowed());
                 assert!(borrowed_value.is_borrowed());
             }
         }
@@ -298,6 +324,7 @@ macro_rules! static_wrapper_suite {
                 assert_eq!(from_string.clone().into_string(), "hello");
                 assert_eq!(from_box.into_boxed_str().as_ref(), "boxed");
                 assert_eq!(from_cow.as_str(), "cow");
+                assert!(from_string.is_inline());
             }
 
             #[test]
@@ -415,12 +442,12 @@ macro_rules! static_wrapper_suite {
             fn raw_roundtrip() {
                 let original: $shared = ($make_shared)("raw");
                 let value = Sut::from_shared(original.clone());
-                let (raw_ptr, len, tag) = unsafe { Sut::into_raw_parts(value) };
+                let parts = unsafe { Sut::into_raw_parts(value) };
 
-                assert_eq!(len, 3);
-                assert_ne!(tag, 0);
+                assert_eq!(parts.len(), 3);
+                assert!(parts.is_shared());
 
-                let value = unsafe { Sut::from_raw_parts(raw_ptr, len, tag) };
+                let value = unsafe { Sut::from_raw_parts(parts) };
                 let raw = unsafe { Sut::into_raw(value) };
 
                 assert_eq!($strong_count(&original), 2);
@@ -456,8 +483,8 @@ macro_rules! static_wrapper_suite {
                 ))
                 .unwrap();
 
-                assert!(borrowed.is_shared());
-                assert!(owned.is_shared());
+                assert!(!borrowed.is_borrowed());
+                assert!(!owned.is_borrowed());
             }
 
             #[cfg(feature = "arbitrary")]
@@ -469,7 +496,7 @@ macro_rules! static_wrapper_suite {
                 let value = Sut::arbitrary(&mut input).unwrap();
 
                 assert_eq!(value.as_str(), "hello");
-                assert!(value.is_shared());
+                assert!(!value.is_borrowed());
             }
         }
     };
@@ -529,6 +556,103 @@ fn shared_variants_are_send_and_sync() {
 }
 
 #[test]
+fn option_layout_stays_compact() {
+    assert_eq!(
+        size_of::<Option<RefStr<'static>>>(),
+        size_of::<RefStr<'static>>()
+    );
+    assert_eq!(
+        size_of::<Option<LocalRefStr<'static>>>(),
+        size_of::<LocalRefStr<'static>>()
+    );
+    assert_eq!(size_of::<Option<StaticRefStr>>(), size_of::<StaticRefStr>());
+    assert_eq!(
+        size_of::<Option<LocalStaticRefStr>>(),
+        size_of::<LocalStaticRefStr>()
+    );
+}
+
+#[test]
+fn inline_capacity_boundary_stays_correct() {
+    #[cfg(target_endian = "little")]
+    {
+        #[cfg(target_pointer_width = "64")]
+        let max_inline = RefStr::from(String::from("123456789012345"));
+        #[cfg(target_pointer_width = "64")]
+        let too_long = RefStr::from(String::from("1234567890123456"));
+
+        #[cfg(not(target_pointer_width = "64"))]
+        let max_inline = RefStr::from(String::from("1234567"));
+        #[cfg(not(target_pointer_width = "64"))]
+        let too_long = RefStr::from(String::from("12345678"));
+
+        assert!(max_inline.is_inline());
+        assert_eq!(
+            max_inline.as_str(),
+            if cfg!(target_pointer_width = "64") {
+                "123456789012345"
+            } else {
+                "1234567"
+            }
+        );
+        assert!(too_long.is_shared());
+    }
+
+    #[cfg(target_endian = "big")]
+    {
+        #[cfg(target_pointer_width = "64")]
+        let max_inline = RefStr::from(String::from("123456789012345"));
+        #[cfg(target_pointer_width = "64")]
+        let too_long = RefStr::from(String::from("1234567890123456"));
+
+        #[cfg(not(target_pointer_width = "64"))]
+        let max_inline = RefStr::from(String::from("1234567"));
+        #[cfg(not(target_pointer_width = "64"))]
+        let too_long = RefStr::from(String::from("12345678"));
+
+        assert!(max_inline.is_inline());
+        assert_eq!(
+            max_inline.as_str(),
+            if cfg!(target_pointer_width = "64") {
+                "123456789012345"
+            } else {
+                "1234567"
+            }
+        );
+        assert!(too_long.is_shared());
+    }
+}
+
+#[test]
+fn ascii_cache_roundtrip_stays_consistent() {
+    let borrowed_ascii = RefStr::from("hello");
+    let borrowed_non_ascii = RefStr::from("héllo");
+    let inline_ascii = RefStr::from(String::from("tiny"));
+    let shared_ascii = RefStr::from(String::from("this string is definitely shared"));
+
+    assert!(borrowed_ascii.is_ascii());
+    assert!(!borrowed_non_ascii.is_ascii());
+    assert!(inline_ascii.is_ascii());
+    assert!(shared_ascii.is_ascii());
+
+    let borrowed_parts = unsafe { RefStr::into_raw_parts(borrowed_ascii) };
+    let inline_parts = unsafe { RefStr::into_raw_parts(inline_ascii) };
+    let shared_parts = unsafe { RefStr::into_raw_parts(shared_ascii) };
+
+    assert!(borrowed_parts.is_ascii());
+    assert!(inline_parts.is_ascii());
+    assert!(shared_parts.is_ascii());
+
+    let borrowed_back = unsafe { RefStr::from_raw_parts(borrowed_parts) };
+    let inline_back = unsafe { RefStr::from_raw_parts(inline_parts) };
+    let shared_back = unsafe { RefStr::from_raw_parts(shared_parts) };
+
+    assert!(borrowed_back.is_ascii());
+    assert!(inline_back.is_ascii());
+    assert!(shared_back.is_ascii());
+}
+
+#[test]
 fn as_cow_is_not_tied_to_container_lifetime() {
     fn via_ref_str<'a>(s: &'a str) -> Cow<'a, str> {
         let value = RefStr::from(s);
@@ -551,16 +675,22 @@ fn as_cow_is_not_tied_to_container_lifetime() {
 #[test]
 fn alternate_debug_exposes_state() {
     let borrowed = RefStr::from("hello");
-    let shared = RefStr::from(String::from("world"));
+    let inline = RefStr::from(String::from("tiny"));
+    let shared = RefStr::from(String::from("this string is definitely shared"));
 
     let borrowed_dbg = format!("{:#?}", borrowed);
+    let inline_dbg = format!("{:#?}", inline);
     let shared_dbg = format!("{:#?}", shared);
 
     assert!(borrowed_dbg.contains("state: \"Borrowed\""));
     assert!(borrowed_dbg.contains("len: 5"));
     assert!(borrowed_dbg.contains("value: \"hello\""));
 
+    assert!(inline_dbg.contains("state: \"Inline\""));
+    assert!(inline_dbg.contains("len: 4"));
+    assert!(inline_dbg.contains("value: \"tiny\""));
+
     assert!(shared_dbg.contains("state: \"Shared\""));
-    assert!(shared_dbg.contains("len: 5"));
-    assert!(shared_dbg.contains("value: \"world\""));
+    assert!(shared_dbg.contains("len: 32"));
+    assert!(shared_dbg.contains("value: \"this string is definitely shared\""));
 }

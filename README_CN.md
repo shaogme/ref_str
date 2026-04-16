@@ -18,33 +18,33 @@
 
 ```toml
 [dependencies]
-ref_str = "0.1"
+ref_str = "0.2"
 ```
 
 启用 serde：
 
 ```toml
 [dependencies]
-ref_str = { version = "0.1", features = ["serde"] }
+ref_str = { version = "0.2", features = ["serde"] }
 ```
 
 启用 serde + std：
 
 ```toml
 [dependencies]
-ref_str = { version = "0.1", features = ["serde", "std"] }
+ref_str = { version = "0.2", features = ["serde", "std"] }
 ```
 
 启用 arbitrary：
 
 ```toml
 [dependencies]
-ref_str = { version = "0.1", features = ["arbitrary"] }
+ref_str = { version = "0.2", features = ["arbitrary"] }
 ```
 
 ## 概览
 
-`LocalRefStr<'a>` 和 `RefStr<'a>` 可以在借用的 `&'a str` 与共享拥有的字符串之间切换，同时保持紧凑布局。`LocalStaticRefStr` 和 `StaticRefStr` 则提供了专门的 `'static` wrapper，在保持相同布局与 API 形状的同时，显式区分 static-only 的 serde/arbitrary 语义。
+`LocalRefStr<'a>` 和 `RefStr<'a>` 可以在借用的 `&'a str` 与共享拥有的字符串之间切换，同时保持紧凑布局。在 64 位平台上，inline 字符串现在最多可容纳 15 字节。`LocalStaticRefStr` 和 `StaticRefStr` 则提供了专门的 `'static` wrapper，在保持相同布局与 API 形状的同时，显式区分 static-only 的 serde/arbitrary 语义。
 
 四个公开类型共享同一套核心语义：
 
@@ -58,7 +58,7 @@ ref_str = { version = "0.1", features = ["arbitrary"] }
 - `LocalRefStr<'a>` 面向单线程场景，在需要共享拥有时使用 `Rc<str>`。
 - `RefStr<'a>` 是线程安全版本，在需要共享拥有时使用 `Arc<str>`。
 - `LocalStaticRefStr` 和 `StaticRefStr` 分别对应上述两种后端，但语义固定为 `'static`，不再依赖 `RefStr<'static>` 这类别名来表达。
-- 普通 `'a` wrapper 可以直接反序列化借用字符串，而 static wrapper 在 `Deserialize` 和 `Arbitrary` 路径上都会物化成 shared owned 字符串。
+- 普通 `'a` wrapper 可以直接反序列化借用字符串，而 static wrapper 在 `Deserialize` 和 `Arbitrary` 路径上都会物化成拥有态字符串。
 
 ## API
 
@@ -75,7 +75,7 @@ ref_str = { version = "0.1", features = ["arbitrary"] }
 | `from_static(&'static str)` | 构造借用态的 static wrapper |
 | `to_static_str()` | 提升为 `'static` 变体；共享态下克隆，借用态下分配 |
 | `into_static_str()` | 消耗并提升为 `'static`；共享态下转移所有权，借用态下分配 |
-| `is_borrowed()` / `is_shared()` | 检查当前存储状态 |
+| `is_borrowed()` / `is_inline()` / `is_shared()` / `is_ascii()` | 检查当前存储状态与缓存的 ASCII 标记 |
 | `len()` / `is_empty()` | 查询字符串长度 |
 | `as_str()` / `as_cow()` | 借用为 `&str` 或转成 `Cow<str>`；shared 态下 `as_cow()` 会复制 |
 | `into_cow()` | 转成借用或拥有的 `Cow<str>` |
@@ -110,8 +110,8 @@ ref_str = { version = "0.1", features = ["arbitrary"] }
 
 - `from_raw_parts` 也是 `unsafe`，因为调用方必须提供合法、非空的指针和正确的长度/标签组合。
 - `into_str_unchecked` 也是 `unsafe`，因为它只在当前值确实处于借用态时才是健全的。
-- `LocalStaticRefStr` 和 `StaticRefStr` 在反序列化时不会产出借用态；非 `'static` 输入会统一转成 shared owned 存储。
-- `from_owned_like` 总是构造共享态，即使输入本身是 `&str`。
+- `LocalStaticRefStr` 和 `StaticRefStr` 在反序列化时不会产出借用态；非 `'static` 输入会统一转成拥有态存储。
+- `from_owned_like` 总是构造拥有态；短字符串优先内联，较长字符串才进入共享态。在 64 位平台上，inline 路径最多接受 15 字节。
 
 ## 示例
 
@@ -122,19 +122,24 @@ use alloc::string::String;
 use ref_str::{LocalRefStr, RefStr, StaticRefStr};
 
 let local: LocalRefStr<'_> = String::from("hello").into();
-let shared: RefStr<'_> = String::from("world").into();
+let inline: RefStr<'_> = String::from("world").into();
+let shared: RefStr<'_> = String::from("this string is definitely shared").into();
 
 assert_eq!(local.as_str(), "hello");
-assert_eq!(shared.as_str(), "world");
+assert!(local.is_inline());
+assert_eq!(inline.as_str(), "world");
+assert!(inline.is_inline());
+assert_eq!(shared.as_str(), "this string is definitely shared");
+assert!(shared.is_shared());
 
 let back: LocalRefStr<'_> = shared.into();
-assert_eq!(back.as_str(), "world");
+assert_eq!(back.as_str(), "this string is definitely shared");
 
 let static_value = StaticRefStr::from_static("literal");
 assert!(static_value.is_borrowed());
 
-let forced_shared = RefStr::from_owned_like("shared");
-assert!(forced_shared.is_shared());
+let owned = RefStr::from_owned_like("shared");
+assert!(owned.is_inline());
 ```
 
 ## 示例
@@ -183,8 +188,8 @@ use alloc::sync::Arc;
 use ref_str::RefStr;
 
 let value = RefStr::from_shared(Arc::from("hello"));
-let (raw_ptr, len, tag) = unsafe { RefStr::into_raw_parts(value) };
-let value = unsafe { RefStr::from_raw_parts(raw_ptr, len, tag) };
+let parts = unsafe { RefStr::into_raw_parts(value) };
+let value = unsafe { RefStr::from_raw_parts(parts) };
 assert_eq!(value.as_str(), "hello");
 ```
 
@@ -230,7 +235,7 @@ assert_eq!(value.as_str(), "hello");
 use ref_str::RefStr;
 
 let value = RefStr::from_owned_like("hello");
-assert!(value.is_shared());
+assert!(value.is_inline());
 assert_eq!(value.as_str(), "hello");
 ```
 
@@ -242,9 +247,9 @@ use ref_str::RefStr;
 let s = String::from("hello");
 let borrowed = RefStr::from(s.as_str()); 
 
-// 提升为 StaticRefStr (由于原本是借用态，此处会分配内存)
+// 提升为 StaticRefStr（短借用串会优先转成 Inline）
 let static_val = borrowed.into_static_str();
-assert!(static_val.is_shared());
+assert!(static_val.is_inline());
 ```
 
 ## 说明
@@ -252,7 +257,7 @@ assert!(static_val.is_shared());
 - 本 crate 是 `no_std`，依赖 `alloc`
 - `std` feature 本身不会启用 serde，只会在 serde 已启用时透传 `serde/std`
 - `arbitrary` feature 会为模糊测试和性质测试启用 `Arbitrary`
-- `RefStr<'a>` / `LocalRefStr<'a>` 在 `Deserialize` 和 `Arbitrary` 路径上可以保留借用态，而 `StaticRefStr` / `LocalStaticRefStr` 会统一物化为 shared owned 字符串
+- `RefStr<'a>` / `LocalRefStr<'a>` 在 `Deserialize` 和 `Arbitrary` 路径上可以保留借用态，而 `StaticRefStr` / `LocalStaticRefStr` 会统一物化为拥有态字符串
 - `from_owned_like`、`String`、`Box<str>`、`Rc<str>`、`Arc<str>` 这些构造路径都会产生共享态
 - `Default::default()` 会为四个 wrapper 都创建空字符串的借用态值
 

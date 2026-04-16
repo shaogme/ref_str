@@ -1,7 +1,8 @@
 //! Compact borrowed-or-shared string types for `no_std` Rust.
 //!
 //! `ref_str` stores either:
-//! - a borrowed `&str`, or
+//! - a borrowed `&str`,
+//! - an inline short string stored inside the value itself, or
 //! - a shared owned string backed by [`Arc<str>`] or [`Rc<str>`]
 //!
 //! The public wrappers sit on top of a compact two-word core representation, so
@@ -18,18 +19,20 @@
 //!
 //! The lifetime-parameterized wrappers can preserve borrowed data during
 //! deserialization. The dedicated `'static` wrappers always deserialize into
-//! shared owned storage, even when the input format exposes borrowed strings.
+//! owned storage, even when the input format exposes borrowed strings.
 //!
 //! # Borrowed vs Shared
 //!
-//! Each value is always in exactly one of two states:
+//! Each value is always in exactly one of three states:
 //! - borrowed, exposed by [`is_borrowed`](RefStr::is_borrowed)
+//! - inline, exposed by [`is_inline`](RefStr::is_inline)
 //! - shared, exposed by [`is_shared`](RefStr::is_shared)
 //!
 //! Borrowed values preserve the original lifetime and can be recovered as `&str`
-//! or `Cow<'a, str>` without allocation. Shared values own their backing
-//! allocation through `Arc<str>` or `Rc<str>`, and cloning them only bumps the
-//! reference count.
+//! or `Cow<'a, str>` without allocation. Inline values own short strings inside
+//! the compact two-word payload. Shared values own their backing allocation
+//! through `Arc<str>` or `Rc<str>`, and cloning them only bumps the reference
+//! count.
 //!
 //! # Common Operations
 //!
@@ -38,7 +41,8 @@
 //!   [`from_owned_like`](RefStr::from_owned_like), [`from_shared`](RefStr::from_shared),
 //!   and [`from_static`](StaticRefStr::from_static) for the dedicated static types
 //! - state inspection via [`is_borrowed`](RefStr::is_borrowed),
-//!   [`is_shared`](RefStr::is_shared), [`len`](RefStr::len), and
+//!   [`is_inline`](RefStr::is_inline), [`is_shared`](RefStr::is_shared),
+//!   [`is_ascii`](RefStr::is_ascii), [`len`](RefStr::len), and
 //!   [`is_empty`](RefStr::is_empty)
 //! - string access through [`as_str`](RefStr::as_str), [`as_cow`](RefStr::as_cow),
 //!   [`into_cow`](RefStr::into_cow), [`into_string`](RefStr::into_string),
@@ -70,10 +74,11 @@
 //! ownership rules, and encoded tag values.
 //!
 //! [`into_raw`](RefStr::into_raw) is intentionally low-level: its returned
-//! `*const str` may point to either borrowed data or shared backend storage. If
-//! you need a raw pointer that is guaranteed to come from shared storage,
-//! prefer [`into_raw_shared`](RefStr::into_raw_shared). Passing a borrowed
-//! pointer from `into_raw` into
+//! `*const str` may point to borrowed data or shared backend storage. Inline
+//! values materialize shared storage before producing a raw pointer. If you
+//! need a raw pointer that is guaranteed to come from shared storage, prefer
+//! [`into_raw_shared`](RefStr::into_raw_shared). Passing a borrowed pointer from
+//! `into_raw` into
 //! [`increment_strong_count`](RefStr::increment_strong_count) is undefined
 //! behavior.
 //!
@@ -86,9 +91,12 @@
 //! assert!(borrowed.is_borrowed());
 //! assert_eq!(borrowed.as_str(), "hello");
 //!
-//! let shared = RefStr::from(String::from("world"));
+//! let inline = RefStr::from(String::from("world"));
+//! assert!(inline.is_inline());
+//! assert_eq!(inline.clone().into_string(), "world");
+//!
+//! let shared = RefStr::from(String::from("this string is definitely shared"));
 //! assert!(shared.is_shared());
-//! assert_eq!(shared.clone().into_string(), "world");
 //!
 //! let borrowed_cow = borrowed.as_cow();
 //! assert_eq!(borrowed_cow.as_ref(), "hello");
@@ -109,14 +117,17 @@ mod readme_cn_doctests {}
 
 extern crate alloc;
 
+mod arch;
+mod backend;
+mod core;
+mod raw;
+
 use ::core::borrow::Borrow;
 use ::core::cmp::Ordering;
 use ::core::fmt;
 use ::core::hash::{Hash, Hasher};
 use ::core::mem::ManuallyDrop;
 use ::core::ops::Deref;
-use ::core::ptr;
-use ::core::ptr::NonNull;
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -129,7 +140,7 @@ use arbitrary::{Arbitrary, Result as ArbitraryResult, Unstructured};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-mod core;
+pub use crate::raw::RawParts;
 
 /// A compact string that is either borrowed for `'a` or shared via [`Arc<str>`].
 ///
@@ -187,23 +198,22 @@ macro_rules! impl_ref_str_common {
             }
 
             #[inline]
-            const unsafe fn into_raw_parts_struct(self) -> crate::core::RawParts {
-                let this = ManuallyDrop::new(self);
-                let this_ptr = &this as *const ManuallyDrop<Self> as *const Self;
-                let inner_ptr = unsafe {
-                    ptr::addr_of!((*this_ptr).0)
-                        as *const ManuallyDrop<crate::core::RefStrCore<$lt, $backend>>
+            const unsafe fn into_raw_parts_struct(self) -> crate::RawParts {
+                #[repr(C)]
+                union View<T> {
+                    outer: ManuallyDrop<T>,
+                    parts: crate::RawParts,
+                }
+
+                let view = View {
+                    outer: ManuallyDrop::new(self),
                 };
 
-                unsafe {
-                    <crate::core::RefStrCore<$lt, $backend>>::raw_parts_from_manuallydrop_ptr(
-                        inner_ptr,
-                    )
-                }
+                unsafe { view.parts }
             }
 
             #[inline]
-            const unsafe fn into_inner(self) -> crate::core::RefStrCore<$lt, $backend> {
+            unsafe fn into_inner(self) -> crate::core::RefStrCore<$lt, $backend> {
                 unsafe {
                     <crate::core::RefStrCore<$lt, $backend>>::from_raw_parts_struct(
                         self.into_raw_parts_struct(),
@@ -228,11 +238,11 @@ macro_rules! impl_ref_str_common {
                 Self::from_inner(<crate::core::RefStrCore<$lt, $backend>>::from_str(s))
             }
 
-            /// Create a shared value from any string-like input.
+            /// Create an owned value from any string-like input.
             ///
-            /// Unlike [`from_str`](Self::from_str), this always goes through the
-            /// backend's shared representation and therefore allocates and
-            /// produces a shared value, even if the input is already `&str`.
+            /// Unlike [`from_str`](Self::from_str), this copies the input into
+            /// owned storage. Short strings are stored inline, while longer
+            /// strings use the backend's shared representation.
             #[inline]
             pub fn from_owned_like<R: AsRef<str>>(s: R) -> Self {
                 Self::from_inner(<crate::core::RefStrCore<$lt, $backend>>::from_owned_like(s))
@@ -242,17 +252,13 @@ macro_rules! impl_ref_str_common {
             ///
             /// # Safety
             ///
-            /// `raw_ptr`, `len`, and `tag` must come from a compatible `$ty` value created by this
-            /// crate. The pointer must reference valid UTF-8 for `len` bytes, and `tag` must be a
-            /// valid encoding tag for this representation.
+            /// `parts` must come from a compatible `$ty` value created by this
+            /// crate. The pointer/metadata pair must reference valid UTF-8 and a
+            /// valid encoding state for this representation.
             #[inline]
-            pub const unsafe fn from_raw_parts(
-                raw_ptr: NonNull<u8>,
-                len: usize,
-                tag: usize,
-            ) -> Self {
+            pub const unsafe fn from_raw_parts(parts: crate::RawParts) -> Self {
                 Self::from_inner(unsafe {
-                    <crate::core::RefStrCore<$lt, $backend>>::from_raw_parts(raw_ptr, len, tag)
+                    <crate::core::RefStrCore<$lt, $backend>>::from_raw_parts(parts)
                 })
             }
 
@@ -272,8 +278,8 @@ macro_rules! impl_ref_str_common {
             /// reconstruct the value with [`from_raw_parts`](Self::from_raw_parts) or otherwise
             /// release the underlying shared allocation exactly once.
             #[inline]
-            pub const unsafe fn into_raw_parts(self) -> (NonNull<u8>, usize, usize) {
-                unsafe { self.into_raw_parts_struct().into_tuple() }
+            pub const unsafe fn into_raw_parts(self) -> crate::RawParts {
+                unsafe { self.into_raw_parts_struct() }
             }
 
             /// Convert this value into a raw `*const str`.
@@ -291,8 +297,8 @@ macro_rules! impl_ref_str_common {
             /// [`into_raw_parts`](Self::into_raw_parts) or
             /// [`into_raw_shared`](Self::into_raw_shared).
             #[inline]
-            pub const unsafe fn into_raw(self) -> *const str {
-                unsafe { self.into_raw_parts_struct().into_raw() }
+            pub unsafe fn into_raw(self) -> *const str {
+                unsafe { self.into_inner().into_raw() }
             }
 
             /// Convert into a raw pointer only when this value is shared.
@@ -328,6 +334,18 @@ macro_rules! impl_ref_str_common {
             #[inline]
             pub const fn is_borrowed(&self) -> bool {
                 self.inner().is_borrowed()
+            }
+
+            /// Returns `true` when this value stores an inline short string.
+            #[inline]
+            pub const fn is_inline(&self) -> bool {
+                self.inner().is_inline()
+            }
+
+            /// Returns `true` when the cached contents are ASCII-only.
+            #[inline]
+            pub const fn is_ascii(&self) -> bool {
+                self.inner().is_ascii()
             }
 
             /// Returns the string length in bytes.
@@ -368,7 +386,8 @@ macro_rules! impl_ref_str_common {
 
             /// Converts this value into [`Cow<str>`][Cow].
             ///
-            /// Borrowed values stay borrowed. Shared values become owned strings.
+            /// Borrowed values stay borrowed. Inline and shared values become
+            /// owned strings.
             #[inline]
             pub fn into_cow(self) -> Cow<$lt, str> {
                 unsafe { self.into_inner() }.into_cow()
@@ -463,6 +482,8 @@ macro_rules! impl_ref_str_common {
                 if f.alternate() {
                     let state = if self.is_shared() {
                         "Shared"
+                    } else if self.is_inline() {
+                        "Inline"
                     } else {
                         "Borrowed"
                     };
@@ -520,14 +541,14 @@ macro_rules! impl_ref_str_non_static {
         }
 
         impl<$lt> From<Box<str>> for $name<$lt> {
-            /// Creates a shared value from `Box<str>`.
+            /// Creates an owned value from `Box<str>`.
             fn from(value: Box<str>) -> Self {
                 Self::from_inner(<crate::core::RefStrCore<$lt, $backend>>::from(value))
             }
         }
 
         impl<$lt> From<String> for $name<$lt> {
-            /// Creates a shared value from [`String`].
+            /// Creates an owned value from [`String`].
             fn from(value: String) -> Self {
                 Self::from_inner(<crate::core::RefStrCore<$lt, $backend>>::from(value))
             }
@@ -536,7 +557,8 @@ macro_rules! impl_ref_str_non_static {
         impl<$lt> From<Cow<$lt, str>> for $name<$lt> {
             /// Creates a value from [`Cow<str>`][Cow].
             ///
-            /// Borrowed `Cow` values stay borrowed, while owned values become shared.
+            /// Borrowed `Cow` values stay borrowed, while owned values become
+            /// owned storage.
             fn from(value: Cow<$lt, str>) -> Self {
                 Self::from_inner(<crate::core::RefStrCore<$lt, $backend>>::from(value))
             }
@@ -766,8 +788,8 @@ impl_ref_str_common! {
 
         /// Borrows the contents as [`Cow<str>`][Cow].
         ///
-        /// Borrowed values stay borrowed. Shared values allocate and clone into
-        /// an owned string to satisfy the borrow semantics of `Cow`.
+        /// Borrowed values stay borrowed. Inline and shared values allocate and
+        /// clone into an owned string to satisfy the borrow semantics of `Cow`.
         #[inline]
         pub fn as_cow(&self) -> Cow<'a, str> {
             self.inner().as_cow()
@@ -775,8 +797,9 @@ impl_ref_str_common! {
 
         /// Convert to a static RefStr.
         ///
-        /// If the value is shared, it will be cloned to increase the reference count.
-        /// If the value is borrowed, it will be converted to a shared value.
+        /// Shared values are cloned to increase the reference count.
+        /// Borrowed values are copied into owned storage, preferring inline for
+        /// short strings and shared storage for longer ones.
         #[inline]
         pub fn to_static_str(&self) -> StaticRefStr {
             StaticRefStr::from_inner(self.inner().to_static_core())
@@ -784,8 +807,9 @@ impl_ref_str_common! {
 
         /// Convert to a static RefStr.
         ///
-        /// If the value is shared, it will be directly converted to a static RefStr.
-        /// If the value is borrowed, it will be converted to a shared value.
+        /// Shared and inline values are transferred directly.
+        /// Borrowed values are copied into owned storage, preferring inline for
+        /// short strings and shared storage for longer ones.
         #[inline]
         pub fn into_static_str(self) -> StaticRefStr {
             StaticRefStr::from_inner(unsafe { self.into_inner() }.into_static_core())
@@ -801,8 +825,8 @@ impl_ref_str_common! {
 
         /// Borrows the contents as [`Cow<str>`][Cow].
         ///
-        /// Borrowed values stay borrowed. Shared values allocate and clone into
-        /// an owned string to satisfy the borrow semantics of `Cow`.
+        /// Borrowed values stay borrowed. Inline and shared values allocate and
+        /// clone into an owned string to satisfy the borrow semantics of `Cow`.
         #[inline]
         pub fn as_cow(&self) -> Cow<'a, str> {
             self.inner().as_cow()
@@ -810,8 +834,9 @@ impl_ref_str_common! {
 
         /// Convert to a static LocalRefStr.
         ///
-        /// If the value is shared, it will be cloned to increase the reference count.
-        /// If the value is borrowed, it will be converted to a shared value.
+        /// Shared values are cloned to increase the reference count.
+        /// Borrowed values are copied into owned storage, preferring inline for
+        /// short strings and shared storage for longer ones.
         #[inline]
         pub fn to_static_str(&self) -> LocalStaticRefStr {
             LocalStaticRefStr::from_inner(self.inner().to_static_core())
@@ -819,8 +844,9 @@ impl_ref_str_common! {
 
         /// Convert to a static LocalRefStr.
         ///
-        /// If the value is shared, it will be directly converted to a static RefStr.
-        /// If the value is borrowed, it will be converted to a shared value.
+        /// Shared and inline values are transferred directly.
+        /// Borrowed values are copied into owned storage, preferring inline for
+        /// short strings and shared storage for longer ones.
         #[inline]
         pub fn into_static_str(self) -> LocalStaticRefStr {
             LocalStaticRefStr::from_inner(unsafe { self.into_inner() }.into_static_core())
@@ -837,7 +863,11 @@ impl_ref_str_common! {
         /// Borrows the contents as [`Cow<'static, str>`][Cow].
         #[inline]
         pub fn as_cow(&self) -> Cow<'static, str> {
-            self.clone().into_cow()
+            if let Some(value) = self.inner().borrowed_static_str() {
+                Cow::Borrowed(value)
+            } else {
+                Cow::Owned(String::from(self.as_str()))
+            }
         }
 
         /// Creates a borrowed value from `&'static str`.
@@ -857,7 +887,11 @@ impl_ref_str_common! {
         /// Borrows the contents as [`Cow<'static, str>`][Cow].
         #[inline]
         pub fn as_cow(&self) -> Cow<'static, str> {
-            self.clone().into_cow()
+            if let Some(value) = self.inner().borrowed_static_str() {
+                Cow::Borrowed(value)
+            } else {
+                Cow::Owned(String::from(self.as_str()))
+            }
         }
 
         /// Creates a borrowed value from `&'static str`.
@@ -875,7 +909,7 @@ impl_ref_str_static!(LocalStaticRefStr, crate::core::LocalBackend, Rc<str>);
 
 impl_ref_str_partial_eqs! {
     for RefStr<'a> {
-        ['a] RefStr<'a> => |lhs, other| lhs.as_str() == other.as_str();
+        ['a] RefStr<'a> => |lhs, other| lhs.inner() == other.inner();
         ['a] &str => |lhs, other| lhs.as_str() == *other;
         ['a] String => |lhs, other| lhs.as_str() == other.as_str();
         ['a, 'b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
@@ -886,7 +920,7 @@ impl_ref_str_partial_eqs! {
 
 impl_ref_str_partial_eqs! {
     for LocalRefStr<'a> {
-        ['a] LocalRefStr<'a> => |lhs, other| lhs.as_str() == other.as_str();
+        ['a] LocalRefStr<'a> => |lhs, other| lhs.inner() == other.inner();
         ['a] &str => |lhs, other| lhs.as_str() == *other;
         ['a] String => |lhs, other| lhs.as_str() == other.as_str();
         ['a, 'b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
@@ -897,7 +931,7 @@ impl_ref_str_partial_eqs! {
 
 impl_ref_str_partial_eqs! {
     for StaticRefStr {
-        [] StaticRefStr => |lhs, other| lhs.as_str() == other.as_str();
+        [] StaticRefStr => |lhs, other| lhs.inner() == other.inner();
         [] &str => |lhs, other| lhs.as_str() == *other;
         [] String => |lhs, other| lhs.as_str() == other.as_str();
         ['b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();
@@ -908,7 +942,7 @@ impl_ref_str_partial_eqs! {
 
 impl_ref_str_partial_eqs! {
     for LocalStaticRefStr {
-        [] LocalStaticRefStr => |lhs, other| lhs.as_str() == other.as_str();
+        [] LocalStaticRefStr => |lhs, other| lhs.inner() == other.inner();
         [] &str => |lhs, other| lhs.as_str() == *other;
         [] String => |lhs, other| lhs.as_str() == other.as_str();
         ['b] Cow<'b, str> => |lhs, other| lhs.as_str() == other.as_ref();

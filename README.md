@@ -18,33 +18,33 @@
 
 ```toml
 [dependencies]
-ref_str = "0.1"
+ref_str = "0.2"
 ```
 
 With serde support:
 
 ```toml
 [dependencies]
-ref_str = { version = "0.1", features = ["serde"] }
+ref_str = { version = "0.2", features = ["serde"] }
 ```
 
 With serde + std support:
 
 ```toml
 [dependencies]
-ref_str = { version = "0.1", features = ["serde", "std"] }
+ref_str = { version = "0.2", features = ["serde", "std"] }
 ```
 
 With arbitrary support:
 
 ```toml
 [dependencies]
-ref_str = { version = "0.1", features = ["arbitrary"] }
+ref_str = { version = "0.2", features = ["arbitrary"] }
 ```
 
 ## Overview
 
-`LocalRefStr<'a>` and `RefStr<'a>` store either a borrowed `&'a str` or a shared owned string while keeping the representation compact and clone-friendly. `LocalStaticRefStr` and `StaticRefStr` provide dedicated `'static` wrappers with the same layout and API shape, but with explicit static-only serde/arbitrary semantics.
+`LocalRefStr<'a>` and `RefStr<'a>` store a borrowed `&'a str`, an inline short string, or a shared owned string while keeping the representation compact and clone-friendly. On 64-bit targets, inline strings can now hold up to 15 bytes. `LocalStaticRefStr` and `StaticRefStr` provide dedicated `'static` wrappers with the same layout and API shape, but with explicit static-only serde/arbitrary semantics.
 
 All four public types share the same core model:
 
@@ -58,7 +58,7 @@ All four public types share the same core model:
 - `LocalRefStr<'a>` is optimized for single-threaded code and uses `Rc<str>` when it needs shared ownership.
 - `RefStr<'a>` is the thread-safe counterpart and uses `Arc<str>` when it needs shared ownership.
 - `LocalStaticRefStr` and `StaticRefStr` mirror those two backends for `'static` strings, so static-only behavior is expressed by a real wrapper type instead of by aliasing `RefStr<'static>`.
-- The `'a` wrappers can deserialize borrowed strings directly, while the static wrappers always materialize shared owned strings when deserializing or generating `Arbitrary` values.
+- The `'a` wrappers can deserialize borrowed strings directly, while the static wrappers always materialize owned strings when deserializing or generating `Arbitrary` values.
 
 ## API
 
@@ -75,7 +75,7 @@ All four public types share the same core model:
 | `from_static(&'static str)` | Build a borrowed static wrapper |
 | `to_static_str()` | Promote to `'static` variant; clones shared or allocates borrowed |
 | `into_static_str()` | Consume and promote to `'static`; transfers shared or allocates borrowed |
-| `is_borrowed()` / `is_shared()` | Inspect the current storage mode |
+| `is_borrowed()` / `is_inline()` / `is_shared()` / `is_ascii()` | Inspect the current storage mode and cached ASCII flag |
 | `len()` / `is_empty()` | Inspect string length |
 | `as_str()` / `as_cow()` | Borrow as `&str` or convert to `Cow<str>`; `as_cow()` clones when shared |
 | `into_cow()` | Convert into borrowed-or-owned `Cow<str>` |
@@ -110,8 +110,8 @@ All four public types share the same core model:
 
 - `from_raw_parts` is `unsafe` because the caller must provide a valid non-null pointer and a correct length/tag combination.
 - `into_str_unchecked` is `unsafe` because it is only sound for values that are currently borrowed.
-- `LocalStaticRefStr` and `StaticRefStr` never deserialize into borrowed values; non-`'static` input is always converted into shared owned storage.
-- `from_owned_like` always constructs the shared representation, even if the input starts as `&str`.
+- `LocalStaticRefStr` and `StaticRefStr` never deserialize into borrowed values; non-`'static` input is always converted into owned storage.
+- `from_owned_like` always constructs owned storage; short strings are stored inline and longer strings become shared. On 64-bit targets, the inline path accepts up to 15 bytes.
 
 ## Example
 
@@ -122,19 +122,24 @@ use alloc::string::String;
 use ref_str::{LocalRefStr, RefStr, StaticRefStr};
 
 let local: LocalRefStr<'_> = String::from("hello").into();
-let shared: RefStr<'_> = String::from("world").into();
+let inline: RefStr<'_> = String::from("world").into();
+let shared: RefStr<'_> = String::from("this string is definitely shared").into();
 
 assert_eq!(local.as_str(), "hello");
-assert_eq!(shared.as_str(), "world");
+assert!(local.is_inline());
+assert_eq!(inline.as_str(), "world");
+assert!(inline.is_inline());
+assert_eq!(shared.as_str(), "this string is definitely shared");
+assert!(shared.is_shared());
 
 let back: LocalRefStr<'_> = shared.into();
-assert_eq!(back.as_str(), "world");
+assert_eq!(back.as_str(), "this string is definitely shared");
 
 let static_value = StaticRefStr::from_static("literal");
 assert!(static_value.is_borrowed());
 
-let forced_shared = RefStr::from_owned_like("shared");
-assert!(forced_shared.is_shared());
+let owned = RefStr::from_owned_like("shared");
+assert!(owned.is_inline());
 ```
 
 ## Examples
@@ -183,8 +188,8 @@ use alloc::sync::Arc;
 use ref_str::RefStr;
 
 let value = RefStr::from_shared(Arc::from("hello"));
-let (raw_ptr, len, tag) = unsafe { RefStr::into_raw_parts(value) };
-let value = unsafe { RefStr::from_raw_parts(raw_ptr, len, tag) };
+let parts = unsafe { RefStr::into_raw_parts(value) };
+let value = unsafe { RefStr::from_raw_parts(parts) };
 assert_eq!(value.as_str(), "hello");
 ```
 
@@ -230,7 +235,7 @@ Forced shared:
 use ref_str::RefStr;
 
 let value = RefStr::from_owned_like("hello");
-assert!(value.is_shared());
+assert!(value.is_inline());
 assert_eq!(value.as_str(), "hello");
 ```
 
@@ -242,9 +247,9 @@ use ref_str::RefStr;
 let s = String::from("hello");
 let borrowed = RefStr::from(s.as_str()); 
 
-// Promote to StaticRefStr (allocates because it was borrowed)
+// Promote to StaticRefStr (short borrowed strings become inline)
 let static_val = borrowed.to_static_str();
-assert!(static_val.is_shared());
+assert!(static_val.is_inline());
 ```
 
 ## Notes
@@ -252,7 +257,7 @@ assert!(static_val.is_shared());
 - This crate is `no_std` and depends on `alloc`.
 - The `std` feature does not enable `serde` by itself; it only forwards `serde/std` when `serde` is already enabled.
 - The `arbitrary` feature enables `Arbitrary` support for fuzzing and property testing.
-- `RefStr<'a>` / `LocalRefStr<'a>` may deserialize or generate borrowed values, while `StaticRefStr` / `LocalStaticRefStr` always materialize shared owned strings in those paths.
+- `RefStr<'a>` / `LocalRefStr<'a>` may deserialize or generate borrowed values, while `StaticRefStr` / `LocalStaticRefStr` always materialize owned strings in those paths.
 - `from_owned_like`, `String`, `Box<str>`, `Rc<str>`, and `Arc<str>` constructors all create shared values.
 - `Default::default()` creates an empty borrowed value for all four wrappers.
 
