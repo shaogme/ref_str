@@ -4,12 +4,6 @@
 //! layer that decides when a value stays borrowed, becomes inline, or is stored
 //! in shared heap-backed form.
 
-pub use crate::backend::{LocalBackend, RefCountBackend, SharedBackend};
-
-use ::core::borrow::Borrow;
-use ::core::cmp::Ordering;
-use ::core::fmt;
-use ::core::hash::{Hash, Hasher};
 use ::core::marker::PhantomData;
 use ::core::mem::ManuallyDrop;
 use ::core::ops::Deref;
@@ -22,9 +16,112 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::RawParts;
-use crate::arch::encode;
-use crate::arch::layout;
-use crate::arch::layout::StateTag;
+use crate::arch::{self, StateTag};
+
+mod ops;
+
+/// Backend behavior for the shared ownership arm of the compact string type.
+///
+/// The core representation delegates all backend-specific operations through
+/// this trait so the same string machinery can work with either `Rc<str>` or
+/// `Arc<str>`.
+pub trait RefCountBackend {
+    /// The shared string handle for this backend.
+    type Shared: Deref<Target = str>;
+
+    /// Convert the shared string handle into a raw `*const str`.
+    fn into_raw(shared: Self::Shared) -> *const str;
+
+    /// Increment the strong count for a raw `*const str`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must have been produced by this backend and must still point to a
+    /// live allocation.
+    unsafe fn increment_strong_count(ptr: *const str);
+
+    /// Rebuild the shared string handle from a raw `*const str`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a valid pointer previously produced by this backend.
+    unsafe fn from_raw(ptr: *const str) -> Self::Shared;
+
+    /// Build the shared string handle from a `&str`.
+    fn from_str(s: &str) -> Self::Shared;
+
+    /// Build the shared string handle from a [`String`].
+    fn from_string(s: String) -> Self::Shared;
+
+    /// Build the shared string handle from a `Box<str>`.
+    fn from_boxed_str(s: Box<str>) -> Self::Shared;
+}
+
+/// `Rc<str>` backend.
+pub enum LocalBackend {}
+
+impl RefCountBackend for LocalBackend {
+    type Shared = Rc<str>;
+
+    fn into_raw(shared: Self::Shared) -> *const str {
+        Rc::into_raw(shared)
+    }
+
+    unsafe fn increment_strong_count(ptr: *const str) {
+        unsafe {
+            Rc::increment_strong_count(ptr);
+        }
+    }
+
+    unsafe fn from_raw(ptr: *const str) -> Self::Shared {
+        unsafe { Rc::from_raw(ptr) }
+    }
+
+    fn from_str(s: &str) -> Self::Shared {
+        Rc::from(s)
+    }
+
+    fn from_string(s: String) -> Self::Shared {
+        Rc::from(s)
+    }
+
+    fn from_boxed_str(s: Box<str>) -> Self::Shared {
+        Rc::from(s)
+    }
+}
+
+/// `Arc<str>` backend.
+pub enum SharedBackend {}
+
+impl RefCountBackend for SharedBackend {
+    type Shared = Arc<str>;
+
+    fn into_raw(shared: Self::Shared) -> *const str {
+        Arc::into_raw(shared)
+    }
+
+    unsafe fn increment_strong_count(ptr: *const str) {
+        unsafe {
+            Arc::increment_strong_count(ptr);
+        }
+    }
+
+    unsafe fn from_raw(ptr: *const str) -> Self::Shared {
+        unsafe { Arc::from_raw(ptr) }
+    }
+
+    fn from_str(s: &str) -> Self::Shared {
+        Arc::from(s)
+    }
+
+    fn from_string(s: String) -> Self::Shared {
+        Arc::from(s)
+    }
+
+    fn from_boxed_str(s: Box<str>) -> Self::Shared {
+        Arc::from(s)
+    }
+}
 
 /// Internal compact two-word string representation.
 ///
@@ -65,10 +162,10 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
     #[inline]
     pub const fn from_str(s: &'a str) -> Self {
         let raw_ptr = s.as_ptr();
-        let hash = encode::short_hash(s.as_bytes());
-        let mut meta = encode::encode_len_tag_hash(s.len(), StateTag::Borrowed, hash);
+        let hash = arch::short_hash(s.as_bytes());
+        let mut meta = arch::encode_len_tag_hash(s.len(), StateTag::Borrowed, hash);
         if s.is_ascii() {
-            meta |= layout::IS_ASCII_MASK;
+            meta |= arch::IS_ASCII_MASK;
         }
 
         unsafe { Self::from_raw_parts_struct(RawParts::new(raw_ptr, meta)) }
@@ -79,7 +176,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
     pub fn from_owned_like<R: AsRef<str>>(s: R) -> Self {
         let s = s.as_ref();
 
-        if encode::supports_inline_len(s.len()) {
+        if arch::supports_inline_len(s.len()) {
             Self::new_inline(s)
         } else {
             Self::from_shared(B::from_str(s))
@@ -110,12 +207,12 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
     pub fn from_shared(s: B::Shared) -> Self {
         let len = s.deref().len();
         let is_ascii = s.deref().is_ascii();
-        let hash = encode::short_hash(s.deref().as_bytes());
+        let hash = arch::short_hash(s.deref().as_bytes());
         let raw = B::into_raw(s);
         let raw_ptr = raw as *const u8;
-        let mut meta = encode::encode_len_tag_hash(len, StateTag::Shared, hash);
+        let mut meta = arch::encode_len_tag_hash(len, StateTag::Shared, hash);
         if is_ascii {
-            meta |= layout::IS_ASCII_MASK;
+            meta |= arch::IS_ASCII_MASK;
         }
 
         unsafe { Self::from_raw_parts_struct(RawParts::new(raw_ptr, meta)) }
@@ -123,7 +220,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
 
     /// Construct from an owned `String`, using inline storage when possible.
     fn from_owned_string(value: String) -> Self {
-        if encode::supports_inline_len(value.len()) {
+        if arch::supports_inline_len(value.len()) {
             Self::new_inline(value.as_str())
         } else {
             Self::from_shared(B::from_string(value))
@@ -132,7 +229,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
 
     /// Construct from an owned `Box<str>`, using inline storage when possible.
     fn from_owned_boxed_str(value: Box<str>) -> Self {
-        if encode::supports_inline_len(value.len()) {
+        if arch::supports_inline_len(value.len()) {
             Self::new_inline(value.as_ref())
         } else {
             Self::from_shared(B::from_boxed_str(value))
@@ -246,13 +343,13 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
         unsafe {
             let parts = self.parts;
             let meta = parts.meta();
-            let (raw_ptr, len) = if (meta & layout::INLINE_MASK) != 0 {
+            let (raw_ptr, len) = if (meta & arch::INLINE_MASK) != 0 {
                 (
                     self as *const Self as *const u8,
-                    encode::inline_len_from_meta(meta),
+                    arch::inline_len_from_meta(meta),
                 )
             } else {
-                (parts.as_ptr(), encode::decode_borrowed_or_shared_len(meta))
+                (parts.as_ptr(), arch::decode_borrowed_or_shared_len(meta))
             };
             let slice = ::core::slice::from_raw_parts(raw_ptr, len);
             ::core::str::from_utf8_unchecked(slice)
@@ -271,7 +368,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
                 RefStrCore::from_raw_parts(self.clone().into_raw_parts())
             },
             StateTag::Borrowed => {
-                if encode::supports_inline_len(self.len()) {
+                if arch::supports_inline_len(self.len()) {
                     RefStrCore::new_inline(self.as_str())
                 } else {
                     RefStrCore::from_shared(B::from_str(self.as_str()))
@@ -288,7 +385,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
                 unsafe { RefStrCore::from_raw_parts(parts) }
             }
             StateTag::Borrowed => {
-                if encode::supports_inline_len(self.len()) {
+                if arch::supports_inline_len(self.len()) {
                     RefStrCore::new_inline(self.as_str())
                 } else {
                     RefStrCore::from_shared(B::from_str(self.as_str()))
@@ -334,7 +431,7 @@ impl<'a, B: RefCountBackend> RefStrCore<'a, B> {
         let parts = self.parts;
         let meta = parts.meta();
         let slice =
-            ptr::slice_from_raw_parts(parts.as_ptr(), encode::decode_borrowed_or_shared_len(meta))
+            ptr::slice_from_raw_parts(parts.as_ptr(), arch::decode_borrowed_or_shared_len(meta))
                 as *const str;
 
         unsafe { &*slice }
@@ -380,220 +477,6 @@ impl<B: RefCountBackend> RefStrCore<'static, B> {
             Some(unsafe { self.borrowed_str_unchecked() })
         } else {
             None
-        }
-    }
-}
-
-impl<'a, B: RefCountBackend> From<&'a str> for RefStrCore<'a, B> {
-    fn from(value: &'a str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl<'a, B: RefCountBackend> From<&'a String> for RefStrCore<'a, B> {
-    fn from(value: &'a String) -> Self {
-        Self::from(value.as_str())
-    }
-}
-
-impl<'a> From<Rc<str>> for RefStrCore<'a, LocalBackend> {
-    fn from(value: Rc<str>) -> Self {
-        Self::from_shared(value)
-    }
-}
-
-impl<'a> From<Arc<str>> for RefStrCore<'a, SharedBackend> {
-    fn from(value: Arc<str>) -> Self {
-        Self::from_shared(value)
-    }
-}
-
-impl<'a> From<RefStrCore<'a, LocalBackend>> for RefStrCore<'a, SharedBackend> {
-    fn from(value: RefStrCore<'a, LocalBackend>) -> Self {
-        if value.is_shared() {
-            Self::from_shared(Arc::from(value.as_str()))
-        } else {
-            let parts = unsafe { value.into_raw_parts() };
-            unsafe { Self::from_raw_parts(parts) }
-        }
-    }
-}
-
-impl<'a> From<RefStrCore<'a, SharedBackend>> for RefStrCore<'a, LocalBackend> {
-    fn from(value: RefStrCore<'a, SharedBackend>) -> Self {
-        if value.is_shared() {
-            Self::from_shared(Rc::from(value.as_str()))
-        } else {
-            let parts = unsafe { value.into_raw_parts() };
-            unsafe { Self::from_raw_parts(parts) }
-        }
-    }
-}
-
-impl<'a, B: RefCountBackend> From<Box<str>> for RefStrCore<'a, B> {
-    fn from(value: Box<str>) -> Self {
-        Self::from_owned_boxed_str(value)
-    }
-}
-
-impl<'a, B: RefCountBackend> From<String> for RefStrCore<'a, B> {
-    fn from(value: String) -> Self {
-        Self::from_owned_string(value)
-    }
-}
-
-impl<'a, B: RefCountBackend> From<RefStrCore<'a, B>> for Cow<'a, str> {
-    fn from(value: RefStrCore<'a, B>) -> Self {
-        value.into_cow()
-    }
-}
-
-impl<'a, B: RefCountBackend> From<Cow<'a, str>> for RefStrCore<'a, B> {
-    fn from(value: Cow<'a, str>) -> Self {
-        match value {
-            Cow::Borrowed(s) => Self::from(s),
-            Cow::Owned(s) => Self::from(s),
-        }
-    }
-}
-
-impl<'a, B: RefCountBackend> Default for RefStrCore<'a, B> {
-    fn default() -> Self {
-        Self::from_str("")
-    }
-}
-
-impl<'a, B: RefCountBackend> AsRef<str> for RefStrCore<'a, B> {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<'a, B: RefCountBackend> Borrow<str> for RefStrCore<'a, B> {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<'a, B: RefCountBackend> PartialEq for RefStrCore<'a, B> {
-    fn eq(&self, other: &Self) -> bool {
-        if self.parts.raw_ptr() == other.parts.raw_ptr() && self.parts.meta() == other.parts.meta()
-        {
-            return true;
-        }
-
-        if self.is_inline() || other.is_inline() {
-            return self.as_str() == other.as_str();
-        }
-
-        if self.parts.cached_hash() != other.parts.cached_hash() {
-            return false;
-        }
-
-        if self.len() != other.len() {
-            return false;
-        }
-
-        self.as_str() == other.as_str()
-    }
-}
-
-impl<'a, B: RefCountBackend> Eq for RefStrCore<'a, B> {}
-
-impl<'a, B: RefCountBackend> PartialEq<&str> for RefStrCore<'a, B> {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl<'a, B: RefCountBackend> PartialEq<String> for RefStrCore<'a, B> {
-    fn eq(&self, other: &String) -> bool {
-        self.as_str() == other.as_str()
-    }
-}
-
-impl<'a, B: RefCountBackend> PartialOrd for RefStrCore<'a, B> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<'a, B: RefCountBackend> Ord for RefStrCore<'a, B> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.as_str().cmp(other.as_str())
-    }
-}
-
-impl<'a, B: RefCountBackend> Hash for RefStrCore<'a, B> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state)
-    }
-}
-
-impl<'a, B: RefCountBackend> Deref for RefStrCore<'a, B> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl<'a, B: RefCountBackend> fmt::Debug for RefStrCore<'a, B> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if f.alternate() {
-            let state = match self.state_tag() {
-                StateTag::Borrowed => "Borrowed",
-                StateTag::Shared => "Shared",
-                StateTag::Inline => "Inline",
-            };
-
-            f.debug_struct("RefStrCore")
-                .field("state", &state)
-                .field("len", &self.len())
-                .field("value", &self.as_str())
-                .finish()
-        } else {
-            f.debug_tuple("RefStrCore").field(&self.as_str()).finish()
-        }
-    }
-}
-
-impl<'a, B: RefCountBackend> fmt::Display for RefStrCore<'a, B> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl<'a, B: RefCountBackend> Clone for RefStrCore<'a, B> {
-    fn clone(&self) -> Self {
-        let parts = self.parts;
-        let meta = parts.meta();
-        if (meta & layout::NEEDS_DROP_MASK) != 0 {
-            let len = encode::decode_borrowed_or_shared_len(meta);
-            let fat_ptr = ptr::slice_from_raw_parts(parts.as_ptr(), len) as *const str;
-            unsafe {
-                B::increment_strong_count(fat_ptr);
-            }
-        }
-
-        Self {
-            parts,
-            _marker: PhantomData,
-            _backend: PhantomData,
-        }
-    }
-}
-
-impl<'a, B: RefCountBackend> Drop for RefStrCore<'a, B> {
-    fn drop(&mut self) {
-        let parts = self.parts;
-        let meta = parts.meta();
-        if (meta & layout::NEEDS_DROP_MASK) != 0 {
-            let len = encode::decode_borrowed_or_shared_len(meta);
-            let fat_ptr = ptr::slice_from_raw_parts(parts.as_ptr(), len) as *const str;
-            unsafe {
-                drop(B::from_raw(fat_ptr));
-            }
         }
     }
 }

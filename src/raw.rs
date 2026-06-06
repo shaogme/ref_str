@@ -2,9 +2,7 @@ use ::core::fmt;
 use ::core::num::NonZeroUsize;
 use ::core::ptr;
 
-use crate::arch::encode;
-use crate::arch::layout;
-use crate::arch::layout::StateTag;
+use crate::arch::{self, StateTag};
 
 /// Low-level two-word payload for the compact string representation.
 ///
@@ -43,7 +41,7 @@ pub struct RawParts {
 /// structured fields.
 union RawView {
     parts: RawParts,
-    bytes: [u8; layout::INLINE_TOTAL_BYTES],
+    bytes: [u8; arch::INLINE_TOTAL_BYTES],
 }
 
 impl RawParts {
@@ -55,23 +53,23 @@ impl RawParts {
     /// The tag bits must match one of the supported states, and the length must
     /// fit the corresponding encoding.
     pub const unsafe fn new(raw_ptr: *const u8, meta: usize) -> Self {
-        let tag = match encode::from_meta_checked(meta) {
+        let tag = match arch::from_meta_checked(meta) {
             Some(tag) => tag,
             None => panic!("invalid tag for compressed string"),
         };
 
         match tag {
             StateTag::Borrowed | StateTag::Shared => {
-                let len = encode::decode_borrowed_or_shared_len(meta);
+                let len = arch::decode_borrowed_or_shared_len(meta);
                 assert!(
-                    len <= layout::MAX_BORROWED_OR_SHARED_LEN,
+                    len <= arch::MAX_BORROWED_OR_SHARED_LEN,
                     "string too large to compress"
                 );
             }
             StateTag::Inline => {
-                let len = encode::inline_len_from_meta(meta);
+                let len = arch::inline_len_from_meta(meta);
                 assert!(
-                    len <= layout::INLINE_CAPACITY,
+                    len <= arch::INLINE_CAPACITY,
                     "inline string too large to compress"
                 );
             }
@@ -89,15 +87,15 @@ impl RawParts {
     /// encodes the length, state tag, and ASCII flag in the metadata bytes.
     pub fn pack_inline(s: &str) -> Self {
         let len = s.len();
-        debug_assert!(encode::supports_inline_len(len));
+        debug_assert!(arch::supports_inline_len(len));
 
         let mut view = RawView {
-            bytes: [0u8; layout::INLINE_TOTAL_BYTES],
+            bytes: [0u8; arch::INLINE_TOTAL_BYTES],
         };
 
         unsafe {
             view.bytes[0..len].copy_from_slice(s.as_bytes());
-            view.bytes[layout::BUFFER_TAG_BYTE_INDEX] = encode::inline_tag_byte(len, s.is_ascii());
+            view.bytes[arch::BUFFER_TAG_BYTE_INDEX] = arch::inline_tag_byte(len, s.is_ascii());
 
             view.parts
         }
@@ -116,39 +114,39 @@ impl RawParts {
     /// Return `true` when the payload cached ASCII-only contents.
     pub const fn is_ascii(self) -> bool {
         let meta = self.meta();
-        (meta & layout::IS_ASCII_MASK) != 0
+        (meta & arch::IS_ASCII_MASK) != 0
     }
 
     /// Return the cached short hash for borrowed or shared payloads.
     pub(crate) const fn cached_hash(self) -> usize {
-        encode::decode_cached_hash(self.meta())
+        arch::decode_cached_hash(self.meta())
     }
 
     /// Return `true` when the payload stores a borrowed string.
     pub const fn is_borrowed(self) -> bool {
         let meta = self.meta();
-        (meta & (layout::INLINE_MASK | layout::NEEDS_DROP_MASK)) == 0
+        (meta & (arch::INLINE_MASK | arch::NEEDS_DROP_MASK)) == 0
     }
 
     /// Return `true` when the payload stores a shared string.
     pub const fn is_shared(self) -> bool {
         let meta = self.meta();
-        (meta & layout::NEEDS_DROP_MASK) != 0
+        (meta & arch::NEEDS_DROP_MASK) != 0
     }
 
     /// Return `true` when the payload stores an inline string.
     pub const fn is_inline(self) -> bool {
         let meta = self.meta();
-        (meta & layout::INLINE_MASK) != 0
+        (meta & arch::INLINE_MASK) != 0
     }
 
     /// Return the stored string length in bytes.
     pub const fn len(self) -> usize {
         let meta = self.meta();
-        if (meta & layout::INLINE_MASK) != 0 {
-            encode::inline_len_from_meta(meta)
+        if (meta & arch::INLINE_MASK) != 0 {
+            arch::inline_len_from_meta(meta)
         } else {
-            encode::decode_borrowed_or_shared_len(meta)
+            arch::decode_borrowed_or_shared_len(meta)
         }
     }
 
@@ -169,7 +167,7 @@ impl RawParts {
 
     pub(crate) const fn tag(self) -> StateTag {
         let meta = self.meta();
-        encode::from_meta(meta)
+        arch::from_meta(meta)
     }
 
     /// Convert a non-inline payload into a raw `*const str`.
@@ -181,7 +179,7 @@ impl RawParts {
     /// the returned raw pointer's use.
     pub(crate) const unsafe fn into_raw_non_inline(self) -> *const str {
         let meta = self.meta();
-        let len = encode::decode_borrowed_or_shared_len(meta);
+        let len = arch::decode_borrowed_or_shared_len(meta);
         ptr::slice_from_raw_parts(self.raw_ptr, len) as *const str
     }
 }
