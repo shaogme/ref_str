@@ -73,6 +73,7 @@ ref_str = { version = "0.2", features = ["arbitrary"] }
 | `from_owned_like(impl AsRef<str>)` | 从字符串类输入分配并强制构造共享态 |
 | `from_shared(...)` | 从 `Rc<str>` 或 `Arc<str>` 构造 |
 | `from_static(&'static str)` | 构造借用态的 static wrapper |
+| `From<impl FnOnce() -> R>` | 从返回任意可转换类型的闭包构造包装值 |
 | `to_static_str()` | 提升为 `'static` 变体；共享态下克隆，借用态下分配 |
 | `into_static_str()` | 消耗并提升为 `'static`；共享态下转移所有权，借用态下分配 |
 | `is_borrowed()` / `is_inline()` / `is_shared()` / `is_ascii()` | 检查当前存储状态与缓存的 ASCII 标记 |
@@ -227,6 +228,19 @@ use ref_str::LocalStaticRefStr;
 let value = LocalStaticRefStr::from_static("hello");
 assert!(value.is_borrowed());
 assert_eq!(value.as_str(), "hello");
+```
+
+闭包构造：
+
+```rust
+use ref_str::RefStr;
+
+let value = RefStr::from(|| "hello");
+assert!(value.is_borrowed());
+assert_eq!(value.as_str(), "hello");
+
+let owned = RefStr::from(|| String::from("world"));
+assert_eq!(owned.as_str(), "world");
 ```
 
 强制共享态：

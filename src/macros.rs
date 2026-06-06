@@ -397,6 +397,19 @@ macro_rules! impl_ref_str_non_static {
             }
         }
 
+        impl<$lt, F, R> From<F> for $name<$lt>
+        where
+            F: FnOnce() -> R,
+            Self: From<R>,
+        {
+            /// Creates a value from a closure that returns any type convertible into this type.
+            #[inline]
+            fn from(f: F) -> Self {
+                Self::from(f())
+            }
+        }
+
+
         #[cfg(feature = "arbitrary")]
         impl<$lt> Arbitrary<$lt> for $name<$lt> {
             /// Generates either a borrowed or shared arbitrary string.
@@ -496,6 +509,18 @@ macro_rules! impl_ref_str_static {
             /// Converts into [`Cow<'static, str>`][Cow].
             fn from(value: $name) -> Self {
                 value.into_cow()
+            }
+        }
+
+        impl<F, R> From<F> for $name
+        where
+            F: FnOnce() -> R,
+            Self: From<R>,
+        {
+            /// Creates a `'static` value from a closure that returns any type convertible into this type.
+            #[inline]
+            fn from(f: F) -> Self {
+                Self::from(f())
             }
         }
 

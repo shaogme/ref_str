@@ -225,3 +225,16 @@ impl<'a, B: RefCountBackend> Drop for RefStrCore<'a, B> {
         }
     }
 }
+
+impl<'a, B, F, R> From<F> for RefStrCore<'a, B>
+where
+    B: RefCountBackend,
+    F: FnOnce() -> R,
+    Self: From<R>,
+{
+    /// Creates a `RefStrCore` from a closure that returns any type convertible into this type.
+    #[inline]
+    fn from(f: F) -> Self {
+        Self::from(f())
+    }
+}

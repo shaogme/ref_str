@@ -73,6 +73,7 @@ All four public types share the same core model:
 | `from_owned_like(impl AsRef<str>)` | Always allocate and build a shared value from string-like input |
 | `from_shared(...)` | Build from `Rc<str>` or `Arc<str>` |
 | `from_static(&'static str)` | Build a borrowed static wrapper |
+| `From<impl FnOnce() -> R>` | Build a value from a closure that returns any type convertible into the wrapper |
 | `to_static_str()` | Promote to `'static` variant; clones shared or allocates borrowed |
 | `into_static_str()` | Consume and promote to `'static`; transfers shared or allocates borrowed |
 | `is_borrowed()` / `is_inline()` / `is_shared()` / `is_ascii()` | Inspect the current storage mode and cached ASCII flag |
@@ -227,6 +228,19 @@ use ref_str::LocalStaticRefStr;
 let value = LocalStaticRefStr::from_static("hello");
 assert!(value.is_borrowed());
 assert_eq!(value.as_str(), "hello");
+```
+
+From closure:
+
+```rust
+use ref_str::RefStr;
+
+let value = RefStr::from(|| "hello");
+assert!(value.is_borrowed());
+assert_eq!(value.as_str(), "hello");
+
+let owned = RefStr::from(|| String::from("world"));
+assert_eq!(owned.as_str(), "world");
 ```
 
 Forced shared:

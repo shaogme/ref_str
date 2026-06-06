@@ -694,3 +694,39 @@ fn alternate_debug_exposes_state() {
     assert!(shared_dbg.contains("len: 32"));
     assert!(shared_dbg.contains("value: \"this string is definitely shared\""));
 }
+
+#[test]
+fn from_closure_roundtrip() {
+    // 1. 测试 RefStr
+    let val_ref_str: RefStr<'_> = RefStr::from(|| "hello_ref_str");
+    assert_eq!(val_ref_str.as_str(), "hello_ref_str");
+    assert!(val_ref_str.is_borrowed());
+
+    let val_ref_str_owned: RefStr<'_> = RefStr::from(|| String::from("short"));
+    assert_eq!(val_ref_str_owned.as_str(), "short");
+    assert!(val_ref_str_owned.is_inline());
+
+    // 2. 测试 LocalRefStr
+    let val_local: LocalRefStr<'_> = LocalRefStr::from(|| "hello_local");
+    assert_eq!(val_local.as_str(), "hello_local");
+    assert!(val_local.is_borrowed());
+
+    let val_local_owned: LocalRefStr<'_> = LocalRefStr::from(|| String::from("short_local"));
+    assert_eq!(val_local_owned.as_str(), "short_local");
+
+
+    // 3. 测试 StaticRefStr
+    let val_static: StaticRefStr = StaticRefStr::from(|| "hello_static");
+    assert_eq!(val_static.as_str(), "hello_static");
+
+    let val_static_owned: StaticRefStr = StaticRefStr::from(|| String::from("hello_static_owned"));
+    assert_eq!(val_static_owned.as_str(), "hello_static_owned");
+
+    // 4. 测试 LocalStaticRefStr
+    let val_local_static: LocalStaticRefStr = LocalStaticRefStr::from(|| "hello_local_static");
+    assert_eq!(val_local_static.as_str(), "hello_local_static");
+
+    let val_local_static_owned: LocalStaticRefStr =
+        LocalStaticRefStr::from(|| String::from("hello_local_static_owned"));
+    assert_eq!(val_local_static_owned.as_str(), "hello_local_static_owned");
+}
